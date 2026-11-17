@@ -509,6 +509,51 @@ def run_check(
     )
 
 
+def run_script(
+    path: Union[str, Path],
+    args: Optional[Sequence[str]] = None,
+    bin_path: Optional[Union[str, Path]] = None,
+    timeout: Optional[float] = None,
+    cwd: Optional[Union[str, Path]] = None,
+    env: Optional[dict[str, str]] = None,
+) -> subprocess.CompletedProcess[str]:
+    """Execute `rhp run <path> [args...]` via CLI subprocess.
+
+    Args:
+        path: Path to the RHP file to execute.
+        args: Optional command line arguments to pass to the script.
+        bin_path: Optional custom path to the rhp binary.
+        timeout: Optional execution timeout in seconds.
+        cwd: Optional working directory.
+        env: Optional environment dictionary.
+
+    Returns:
+        subprocess.CompletedProcess containing stdout, stderr, and returncode.
+
+    Raises:
+        RhpNotFoundError: If rhp binary cannot be found.
+    """
+    rhp_bin = get_rhp_binary(bin_path)
+    target = Path(path)
+
+    cmd = [str(rhp_bin), "run", str(target)]
+    if args:
+        cmd.extend(args)
+
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=cwd,
+        env=env,
+        check=False,
+    )
+
+
+run_rhp = run_script
+
+
 class RhpCli:
     """Object-oriented wrapper around the native RHP command-line interface."""
 
@@ -544,3 +589,22 @@ class RhpCli:
             path=path,
             bin_path=self._custom_bin,
         )
+
+    def run(
+        self,
+        path: Union[str, Path],
+        args: Optional[Sequence[str]] = None,
+        timeout: Optional[float] = None,
+        cwd: Optional[Union[str, Path]] = None,
+        env: Optional[dict[str, str]] = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Execute `rhp run`."""
+        return run_script(
+            path=path,
+            args=args,
+            bin_path=self._custom_bin,
+            timeout=timeout,
+            cwd=cwd,
+            env=env,
+        )
+
