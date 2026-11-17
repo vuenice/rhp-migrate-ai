@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-from typing import Optional
+from typing import Any, Optional
 import typer
+from typer.core import TyperGroup
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -31,6 +32,7 @@ from rhp_migrate.engine.rhp_cli import (
     find_rhp_binary,
     run_migrate,
 )
+from rhp_migrate.eval.benchmark import BenchmarkRunner
 from rhp_migrate.verify.compiler_loop import (
     CodeUnit,
     clean_code_fence,
@@ -41,10 +43,32 @@ from rhp_migrate.verify.compiler_loop import (
     verify_and_heal,
 )
 
+
+class DefaultCommandGroup(TyperGroup):
+    """Custom TyperGroup that defaults to the 'migrate' command when no subcommand is specified."""
+
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        if not args:
+            args = ["migrate"]
+        elif args[0] not in self.commands and args[0] not in ("--help", "-h"):
+            args = ["migrate"] + args
+        return super().parse_args(ctx, args)
+
+    def format_help(self, ctx: Any, formatter: Any) -> None:
+        super().format_help(ctx, formatter)
+        cmd = self.get_command(ctx, "migrate")
+        if cmd:
+            formatter.write("\n")
+            with formatter.section("Default Command (migrate) Options"):
+                cmd.format_options(ctx, formatter)
+
+
+
 app = typer.Typer(
     name="rhp-migrate-ai",
     help="AI-powered migration tool from PHP/Laravel to strictly-typed RHP.",
     add_completion=False,
+    cls=DefaultCommandGroup,
 )
 console = Console()
 
@@ -103,7 +127,7 @@ def render_analysis_table(target_path: Path, analyzer: ReadinessAnalyzer) -> Non
             console.print(order_table)
 
 
-@app.command()
+@app.command(name="migrate")
 def main(
     path: Path = typer.Argument(
         Path("."),
@@ -421,5 +445,82 @@ def _print_summary_table(
     console.print(table)
 
 
+@app.command(name="benchmark")
+def benchmark(
+    corpus: Path = typer.Option(
+        Path("./eval/fixtures"),
+        "--corpus",
+        help="Path to evaluation corpus directory containing fixture projects.",
+    ),
+    format: str = typer.Option(
+        "markdown",
+        "--format",
+        help="Output format: 'markdown', 'json', or 'table'.",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Optional file path to write benchmark results.",
+    ),
+    ai: bool = typer.Option(
+        True,
+        "--ai/--no-ai",
+        help="Enable or disable LLM stage for benchmark.",
+    ),
+    model: str = typer.Option(
+        "gemini-2.5-pro",
+        "--model",
+        help="LLM model name.",
+    ),
+    max_retries: int = typer.Option(
+        3,
+        "--max-retries",
+        help="Maximum compiler error retry attempts.",
+    ),
+    in_place: bool = typer.Option(
+        False,
+        "--in-place",
+        help="Run migration directly in-place on fixtures instead of isolated copy.",
+    ),
+) -> None:
+    """Run Layer 8 evaluation harness across sample codebases to measure migration quality."""
+    corpus_path = corpus.resolve()
+    if not corpus_path.exists():
+        console.print(f"[bold red]Error:[/bold red] Corpus directory does not exist: {corpus_path}")
+        raise typer.Exit(code=1)
+
+    runner = BenchmarkRunner(
+        ai=ai,
+        model=model,
+        max_retries=max_retries,
+        isolated=not in_place,
+    )
+
+    with console.status(f"[cyan]Running benchmark on corpus: {corpus_path}...[/cyan]"):
+        suite_result = runner.run_corpus(corpus_path)
+
+    # Format output
+    norm_format = format.lower().strip()
+    if norm_format == "json":
+        output_text = suite_result.to_json(indent=2)
+        console.print(output_text)
+    elif norm_format == "table":
+        console.print(suite_result.to_rich_table())
+        output_text = suite_result.to_markdown()
+    else:  # markdown default
+        output_text = suite_result.to_markdown()
+        console.print(output_text)
+
+    # Write output to file if requested
+    if output:
+        out_path = output.resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        content_to_write = suite_result.to_json(indent=2) if norm_format == "json" else output_text
+        out_path.write_text(content_to_write, encoding="utf-8")
+        console.print(f"[green]Saved benchmark results to:[/green] [cyan]{out_path}[/cyan]")
+
+
 if __name__ == "__main__":
     app()
+
