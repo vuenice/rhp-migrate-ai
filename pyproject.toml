@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling", "editables"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rhp-migrate-ai"
+version = "0.1.0"
+description = "AI-powered migration tool from PHP/Laravel to RHP"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "RHP Migrate AI Team" }
+]
+dependencies = [
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["rhp_migrate"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

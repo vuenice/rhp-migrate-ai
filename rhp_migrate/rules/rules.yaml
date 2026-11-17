@@ -1,0 +1,222 @@
+rules:
+  - id: RHP-SYN-001
+    title: Remove PHP tags
+    category: SYNTAX
+    strategy: DETERMINISTIC
+    php_pattern: "PHP opening (<?php, <?=, <?) and closing (?>) tags"
+    rhp_replacement: "Direct source execution without tags"
+    unsupported: false
+    doc_url: "https://rhp.dev/docs/syntax/tags"
+    llm_prompt_guidance: "Strip leading <?php, <?=, <?, and trailing ?> tags. RHP files are compiled directly as pure source code."
+    examples:
+      - before: |
+          <?php
+          echo "Hello from PHP";
+          ?>
+        after: |
+          echo "Hello from PHP";
+        explanation: "PHP script opening and closing delimiters are removed in RHP."
+
+  - id: RHP-SYN-002
+    title: Remove declare statements
+    category: SYNTAX
+    strategy: DETERMINISTIC
+    php_pattern: "declare(strict_types=1); or declare(ticks=...);"
+    rhp_replacement: null
+    unsupported: false
+    doc_url: "https://rhp.dev/docs/syntax/declarations"
+    llm_prompt_guidance: "RHP enforces strict typing natively at compile time. declare(strict_types=1) and other runtime directives like ticks should be stripped."
+    examples:
+      - before: |
+          declare(strict_types=1);
+
+          function sum(int $a, int $b): int {
+              return $a + $b;
+          }
+        after: |
+          function sum(int $a, int $b): int {
+              return $a + $b;
+          }
+        explanation: "Strip declare(strict_types=1) as strict typing is inherent in RHP."
+
+  - id: RHP-SYN-003
+    title: Replace strict equality with standard equality
+    category: SYNTAX
+    strategy: DETERMINISTIC
+    php_pattern: "$a === $b or $a !== $b"
+    rhp_replacement: "$a == $b or $a != $b"
+    unsupported: false
+    doc_url: "https://rhp.dev/docs/syntax/operators"
+    llm_prompt_guidance: "RHP is strictly typed without dynamic type coercion. Equality operators == and != are strict by default. Replace === with == and !== with !=."
+    examples:
+      - before: |
+          if ($user->status === 'active' && $user->role !== 'guest') {
+              return true;
+          }
+        after: |
+          if ($user->status == 'active' && $user->role != 'guest') {
+              return true;
+          }
+        explanation: "Strict comparison operators === and !== simplify to standard == and != in RHP."
+
+  - id: RHP-SYN-004
+    title: Replace string concatenation operators
+    category: SYNTAX
+    strategy: DETERMINISTIC
+    php_pattern: "$a . $b or $a .= $b"
+    rhp_replacement: "$a + $b or $a += $b"
+    unsupported: false
+    doc_url: "https://rhp.dev/docs/syntax/operators"
+    llm_prompt_guidance: "String concatenation in RHP uses the + and += operators. Replace dot (.) and (.=) concatenation."
+    examples:
+      - before: |
+          $fullName = $first . ' ' . $last;
+          $message = 'Hello ';
+          $message .= $fullName;
+        after: |
+          $fullName = $first + ' ' + $last;
+          $message = 'Hello ';
+          $message += $fullName;
+        explanation: "Replace dot (.) and (.=) string concatenation operators with (+) and (+=)."
+
+  - id: RHP-SYN-005
+    title: Replace list() destructuring with bracket syntax
+    category: SYNTAX
+    strategy: DETERMINISTIC
+    php_pattern: "list($a, $b) = $array"
+    rhp_replacement: "[$a, $b] = $array"
+    unsupported: false
+    doc_url: "https://rhp.dev/docs/syntax/arrays"
+    llm_prompt_guidance: "Replace legacy PHP list(...) destructuring statements with square bracket [...] syntax."
+    examples:
+      - before: |
+          list($x, $y) = getCoordinates();
+        after: |
+          [$x, $y] = getCoordinates();
+        explanation: "Convert legacy list() destructuring into square bracket notation."
+
+  - id: RHP-SYN-006
+    title: Replace foreach with for-in loop
+    category: SYNTAX
+    strategy: DETERMINISTIC
+    php_pattern: "foreach ($collection as $item) or foreach ($collection as $key => $val)"
+    rhp_replacement: "for ($item in $collection) or for ($key, $val in $collection)"
+    unsupported: false
+    doc_url: "https://rhp.dev/docs/syntax/control-flow"
+    llm_prompt_guidance: "Transform foreach ($arr as $item) to for ($item in $arr). For key-value iterations, transform foreach ($arr as $k => $v) to for ($k, $v in $arr)."
+    examples:
+      - before: |
+          foreach ($users as $user) {
+              $names[] = $user->name;
+          }
+          foreach ($attributes as $key => $val) {
+              $meta[$key] = $val;
+          }
+        after: |
+          for ($user in $users) {
+              $names[] = $user->name;
+          }
+          for ($key, $val in $attributes) {
+              $meta[$key] = $val;
+          }
+        explanation: "Use RHP's modern for-in loop construct instead of foreach."
+
+  - id: RHP-HTTP-001
+    title: Convert procedural cURL to fluent Http facade
+    category: HTTP_FACADE
+    strategy: LLM_ASSIST
+    php_pattern: "curl_init(), curl_setopt(), curl_exec(), curl_close()"
+    rhp_replacement: "Http::get(), Http::post(), Http::withHeaders()->..."
+    unsupported: false
+    doc_url: "https://rhp.dev/docs/facades/http"
+    llm_prompt_guidance: "Convert procedural curl_* configurations into fluent Http facade calls. Map CURLOPT_HTTPHEADER to withHeaders(), CURLOPT_TIMEOUT to timeout(), CURLOPT_POSTFIELDS to request payload, and match GET/POST/PUT/DELETE appropriately."
+    examples:
+      - before: |
+          $ch = curl_init('https://api.service.com/v1/orders');
+          curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+          curl_setopt($ch, CURLOPT_POST, true);
+          curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['order_id' => 42]));
+          curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json', 'Authorization: Bearer ' . $token]);
+          $res = curl_exec($ch);
+          curl_close($ch);
+        after: |
+          $res = Http::withHeaders(['Authorization' => 'Bearer ' + $token])
+              ->post('https://api.service.com/v1/orders', ['order_id' => 42])
+              ->body();
+        explanation: "Procedural cURL configuration refactored into fluent, concise Http facade invocation."
+
+  - id: RHP-HTTP-002
+    title: Replace superglobals with Request facade
+    category: HTTP_FACADE
+    strategy: DETERMINISTIC
+    php_pattern: "$_GET['k'], $_POST['k'], $_REQUEST['k']"
+    rhp_replacement: "Request::query('k'), Request::body('k'), Request::input('k')"
+    unsupported: false
+    doc_url: "https://rhp.dev/docs/facades/request"
+    llm_prompt_guidance: "Replace direct access to superglobals $_GET, $_POST, and $_REQUEST with typed methods on the Request facade: Request::query('key') for $_GET, Request::body('key') for $_POST, and Request::input('key') for $_REQUEST."
+    examples:
+      - before: |
+          $query = $_GET['q'] ?? '';
+          $username = $_POST['username'];
+        after: |
+          $query = Request::query('q') ?? '';
+          $username = Request::body('username');
+        explanation: "Migrate PHP raw superglobals to the Request facade."
+
+  - id: RHP-UNSUP-001
+    title: Reflection API unsupported
+    category: UNSUPPORTED
+    strategy: MANUAL_REWRITE
+    php_pattern: "ReflectionClass, ReflectionMethod, ReflectionProperty, ReflectionFunction"
+    rhp_replacement: null
+    unsupported: true
+    doc_url: "https://rhp.dev/docs/unsupported/reflection"
+    llm_prompt_guidance: "The runtime Reflection API is not supported in RHP due to strict compile-time optimization. Mark instances for manual rewrite and suggest compile-time dependency injection, static interfaces, or compile-time codegen."
+    examples:
+      - before: |
+          $reflector = new ReflectionClass(UserService::class);
+          $hasMethod = $reflector->hasMethod('authenticate');
+        after: |
+          // TODO: [RHP-UNSUP-001] Reflection is unsupported in RHP.
+          // Replace with compile-time container registration or explicit interface checks.
+          $hasMethod = method_exists(UserService::class, 'authenticate');
+        explanation: "Reflection API is rejected at compilation; replace with static analysis or interface constraints."
+
+  - id: RHP-UNSUP-002
+    title: Output buffering unsupported
+    category: UNSUPPORTED
+    strategy: MANUAL_REWRITE
+    php_pattern: "ob_start(), ob_get_clean(), ob_get_contents(), ob_end_flush()"
+    rhp_replacement: null
+    unsupported: true
+    doc_url: "https://rhp.dev/docs/unsupported/output-buffering"
+    llm_prompt_guidance: "Output buffering (ob_*) is not supported in RHP. Refactor output capturing to return string values directly, invoke templating engines (e.g. View::render), or utilize streaming response objects."
+    examples:
+      - before: |
+          ob_start();
+          include 'views/header.php';
+          $header = ob_get_clean();
+        after: |
+          // TODO: [RHP-UNSUP-002] Output buffering is unsupported in RHP.
+          $header = View::render('views/header');
+        explanation: "Replace global output buffering with template rendering or explicit string returns."
+
+  - id: RHP-UNSUP-003
+    title: Dynamic file inclusion unsupported
+    category: UNSUPPORTED
+    strategy: MANUAL_REWRITE
+    php_pattern: "include $file, require $file, include_once $path, require_once $path"
+    rhp_replacement: null
+    unsupported: true
+    doc_url: "https://rhp.dev/docs/unsupported/dynamic-includes"
+    llm_prompt_guidance: "Dynamic runtime file inclusions (include $file, require $file) are prohibited in RHP. All modules must be statically resolved at compile time using standard imports and class autoloaders."
+    examples:
+      - before: |
+          $plugin = $_GET['plugin'];
+          require "plugins/{$plugin}.php";
+        after: |
+          // TODO: [RHP-UNSUP-003] Dynamic file inclusion is unsupported in RHP.
+          $plugin = Request::query('plugin');
+          $handler = PluginRegistry::get($plugin);
+          $handler->execute();
+        explanation: "Dynamic require/include must be refactored into static imports, class autoloading, or registry lookups."
