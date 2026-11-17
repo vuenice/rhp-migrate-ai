@@ -1,0 +1,52 @@
+name: Evaluation Benchmark
+
+on:
+  pull_request:
+    branches: [main, master, develop]
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  eval-benchmark:
+    name: Run Migration Benchmark
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run test suite
+        run: |
+          pytest -v
+
+      - name: Run Layer 8 Benchmark Harness
+        run: |
+          rhp-migrate-ai benchmark --corpus=./eval/fixtures/ --format=markdown --no-ai -o benchmark-results.md
+
+      - name: Publish Benchmark Summary to PR
+        run: |
+          cat benchmark-results.md >> $GITHUB_STEP_SUMMARY
+          cat benchmark-results.md
+
+      - name: Upload Benchmark Results Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-benchmark-results
+          path: benchmark-results.md
