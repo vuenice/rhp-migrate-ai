@@ -30,6 +30,7 @@ env/
 
 # Tools & caches
 .pytest_cache/
+.rhp_cache/
 .coverage
 htmlcov/
 .mypy_cache/

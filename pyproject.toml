@@ -21,6 +21,9 @@ dependencies = [
     "networkx>=3.6.1",
 ]
 
+[project.scripts]
+rhp-migrate-ai = "rhp_migrate.cli:app"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
