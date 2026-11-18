@@ -288,6 +288,7 @@ def verify_and_heal(
     llm_runner: Optional[LLMRunner] = None,
     bin_path: Optional[Union[str, Path]] = None,
     extra_instructions: Optional[str] = None,
+    healing_log_out: Optional[list[str]] = None,
 ) -> bool:
     """Verify a migrated file using `rhp check` and auto-heal compiler errors with LLM.
 
@@ -309,6 +310,7 @@ def verify_and_heal(
         llm_runner: Optional configured LLMRunner instance.
         bin_path: Optional custom path to the native rhp executable.
         extra_instructions: Optional additional guidance passed to the LLM during healing.
+        healing_log_out: Optional mutable list to collect healing attempt logs.
 
     Returns:
         True if the file passes `rhp check` with 0 errors, False if verification fails.
@@ -354,6 +356,9 @@ def verify_and_heal(
             loc = f"line {d.line}:{d.column}"
             code_prefix = f"[{d.code}] " if d.code else ""
             diag_feedback.append(f"{code_prefix}{loc}: {d.message}")
+
+        if healing_log_out is not None:
+            healing_log_out.append(f"Attempt {attempt + 1}: Unit '{unit.identifier}' resolving: {', '.join(diag_feedback)}")
 
         # Re-prompt LLM with the error diagnostic and failing code unit
         ai_resp = runner.migrate_unit(

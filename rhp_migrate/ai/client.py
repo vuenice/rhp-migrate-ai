@@ -451,6 +451,14 @@ class MockLLMClient(BaseLLMClient):
             )
             return default_res, usage, default_res.model_dump_json()  # type: ignore[return-value]
 
+        from rhp_migrate.ai.evaluation_models import MigrationCriticReport
+        if issubclass(response_model, MigrationCriticReport):
+            default_critic = MigrationCriticReport(
+                file_path="mock.php",
+                php_version="8.2",
+            )
+            return default_critic, usage, default_critic.model_dump_json()  # type: ignore[return-value]
+
         raise ValueError(f"No mock response available for {response_model.__name__}")
 
 
