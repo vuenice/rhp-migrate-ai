@@ -21,15 +21,20 @@ from rich.progress import (
 from rich.table import Table
 
 from rhp_migrate.ai.client import LLMRunner
+from rhp_migrate.ai.critic import MigrationCritic
 from rhp_migrate.analyzer.dependency_graph import ProjectDependencyGraph
 from rhp_migrate.analyzer.readiness import ReadinessAnalyzer
 from rhp_migrate.analyzer.symbols import SymbolExtractor
 from rhp_migrate.core.cache import MigrationCache
+from rhp_migrate.core.feedback import FeedbackDispatcher
 from rhp_migrate.core.git_manager import GitManager
+from rhp_migrate.core.version_detector import detect_php_version
 from rhp_migrate.engine.fallback_rules import apply_fallback_rules
 from rhp_migrate.engine.rhp_cli import (
     RhpNotFoundError,
     find_rhp_binary,
+    run_check,
+    run_lint,
     run_migrate,
 )
 from rhp_migrate.eval.benchmark import BenchmarkRunner
@@ -169,12 +174,35 @@ def main(
         "--git/--no-git",
         help="Create branch and auto-commit each unit.",
     ),
+    critic: bool = typer.Option(
+        True,
+        "--critic/--no-critic",
+        help="Run AI continuous improvement critic to analyze tool mistakes & opportunities.",
+    ),
+    central_url: Optional[str] = typer.Option(
+        None,
+        "--central-url",
+        help="Centralized telemetry/reporting endpoint (overrides RHP_CENTRAL_URL).",
+    ),
+    php_version: Optional[str] = typer.Option(
+        None,
+        "--php-version",
+        help="Override auto-detected PHP version (e.g. '8.2', '7.4').",
+    ),
 ) -> None:
     """Migrate PHP/Laravel codebase to RHP with dependency ordering, atomic Git commits, and caching."""
     target_path = path.resolve()
     if not target_path.exists():
         console.print(f"[bold red]Error:[/bold red] Target path does not exist: {target_path}")
         raise typer.Exit(code=1)
+
+    # 0. Detect PHP Version
+    detected_php = detect_php_version(target_path)
+    effective_php = php_version or detected_php.version
+    console.print(
+        f"[bold green]PHP Target Version:[/bold green] [cyan]{effective_php}[/cyan] "
+        f"[dim](Source: {detected_php.source})[/dim]"
+    )
 
     # 1. Analyze-only mode (0 edits)
     if analyze_only:
@@ -275,13 +303,20 @@ def main(
 
             current_content = content
             file_deterministic_edits = 0
+            migrate_rep = None
+            post_migrate_content = current_content
 
             # Step A: Deterministic Native `rhp migrate` if binary available
             rhp_bin = find_rhp_binary()
             if rhp_bin:
                 try:
-                    report = run_migrate(file_path, dry_run=dry_run, bin_path=rhp_bin)
-                    file_res = report.get_file_result(file_path)
+                    migrate_rep = run_migrate(
+                        file_path,
+                        dry_run=dry_run,
+                        php_version=detected_php.major,
+                        bin_path=rhp_bin,
+                    )
+                    file_res = migrate_rep.get_file_result(file_path)
                     if file_res and file_res.modified:
                         file_deterministic_edits += (
                             file_res.cookie_set_count
@@ -303,11 +338,20 @@ def main(
                             + (1 if file_res.php_tag_removed else 0)
                         )
                         if not dry_run and file_path.exists():
-                            current_content = file_path.read_text(encoding="utf-8")
+                            post_migrate_content = file_path.read_text(encoding="utf-8")
+                            current_content = post_migrate_content
                 except Exception:
                     pass
 
-            # Step B: AST Fallback Rules
+            # Step B: Native `rhp lint`
+            lint_rep = None
+            if rhp_bin:
+                try:
+                    lint_rep = run_lint(file_path, bin_path=rhp_bin)
+                except Exception:
+                    pass
+
+            # Step C: AST Fallback Rules
             fb_res = apply_fallback_rules(current_content)
             if fb_res.modified:
                 file_deterministic_edits += len(fb_res.edits)
@@ -317,7 +361,7 @@ def main(
 
             deterministic_edits += file_deterministic_edits
 
-            # Step C: LLM Stage for Leftovers
+            # Step D: LLM Stage for Leftovers
             if ai and llm_runner:
                 analyzer = ReadinessAnalyzer()
                 file_rep = analyzer.analyze_file(file_path, source=current_content)
@@ -359,7 +403,8 @@ def main(
                     except Exception:
                         pass
 
-            # Step D: Verification and Auto-Healing
+            # Step E: Verification and Auto-Healing with healing audit
+            healing_log: list[str] = []
             verified = False
             try:
                 if not dry_run:
@@ -367,6 +412,7 @@ def main(
                         file_path,
                         max_retries=max_retries,
                         llm_runner=llm_runner,
+                        healing_log_out=healing_log,
                     )
                 else:
                     verified = True
@@ -382,7 +428,35 @@ def main(
             if file_todos > todos_marked:
                 todos_marked = file_todos
 
-            # Step E: Atomic Git Commit
+            # Capture check report for critic
+            check_rep = None
+            if rhp_bin and file_path.exists():
+                try:
+                    check_rep = run_check(file_path, bin_path=rhp_bin)
+                except Exception:
+                    pass
+
+            # Step F: AI Continuous Improvement Critic & Centralized Dispatch
+            if ai and critic and llm_runner:
+                try:
+                    critic_agent = MigrationCritic(runner=llm_runner)
+                    critic_report = critic_agent.analyze(
+                        file_path=file_path,
+                        php_version=effective_php,
+                        original_code=content,
+                        migrated_code=post_migrate_content,
+                        final_code=final_code,
+                        migrate_report=migrate_rep,
+                        lint_report=lint_rep,
+                        check_report=check_rep,
+                        healing_log=healing_log,
+                    )
+                    dispatcher = FeedbackDispatcher(base_dir=base_dir, central_url=central_url)
+                    dispatcher.dispatch(critic_report)
+                except Exception:
+                    pass
+
+            # Step G: Atomic Git Commit
             if git_mgr is not None and not dry_run and verified:
                 classes = classes_by_file.get(file_path, [])
                 if classes:
@@ -397,7 +471,7 @@ def main(
                 except Exception as exc:
                     console.print(f"[yellow]Warning: Git commit failed for {unit_name}: {exc}[/yellow]")
 
-            # Step F: Update Cache
+            # Step H: Update Cache
             if cache_mgr is not None and not dry_run:
                 cache_mgr.update(
                     file_path=file_path,
@@ -519,6 +593,37 @@ def benchmark(
         content_to_write = suite_result.to_json(indent=2) if norm_format == "json" else output_text
         out_path.write_text(content_to_write, encoding="utf-8")
         console.print(f"[green]Saved benchmark results to:[/green] [cyan]{out_path}[/cyan]")
+
+
+@app.command(name="approve-context")
+def approve_context(
+    base_dir: Path = typer.Option(
+        Path("."),
+        "--dir",
+        help="Base directory of project containing .rhp/feedback/",
+    ),
+    target_context: Path = typer.Option(
+        Path("rhp_migrate/rules/context.md"),
+        "--target",
+        help="Target context markdown file to merge approved blocks into",
+    ),
+) -> None:
+    """Review and merge proposed learning blocks from .rhp/feedback/pending_context.md into the repository context."""
+    dispatcher = FeedbackDispatcher(base_dir=base_dir)
+    pending = dispatcher.load_pending_contexts()
+
+    if not pending:
+        console.print("[yellow]No pending context proposals found to approve.[/yellow]")
+        return
+
+    console.print(f"[bold cyan]Found {len(pending)} pending context proposals:[/bold cyan]")
+    for idx, p in enumerate(pending, 1):
+        console.print(f"  {idx}. [green]{p['file']}[/green] [dim](ID: {p['id']}, PHP {p['php']})[/dim]")
+
+    count = dispatcher.approve_all_pending(target_context)
+    console.print(
+        f"[bold green]Successfully approved and merged {count} proposals into:[/bold green] [cyan]{target_context}[/cyan]"
+    )
 
 
 if __name__ == "__main__":

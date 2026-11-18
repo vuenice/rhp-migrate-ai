@@ -256,6 +256,45 @@ class CheckReport(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Pydantic models for `rhp lint` output
+# ---------------------------------------------------------------------------
+
+class LintDiagnostic(BaseModel):
+    """Diagnostic item produced by `rhp lint --format=json`."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    file: str = Field("", description="Target file path")
+    line: int = Field(1, description="Line number")
+    column: int = Field(1, description="Column number")
+    rule_id: str = Field("", description="Lint rule ID")
+    message: str = Field("", description="Lint message")
+    severity: str = Field("warning", description="Severity (warning/error/info)")
+    auto_fixable: bool = Field(False, description="True if lint rule can be auto-fixed")
+    fix_diff: Optional[str] = Field(None, description="Suggested auto-fix patch if available")
+
+
+class LintReport(BaseModel):
+    """Aggregate lint report produced by `rhp lint --format=json`."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    target_path: str = Field("", description="Path linted")
+    status: str = Field("ok", description="Overall lint status (ok or error)")
+    errors: int = Field(0, description="Total lint errors")
+    warnings: int = Field(0, description="Total lint warnings")
+    diagnostics: list[LintDiagnostic] = Field(default_factory=list, description="Parsed lint diagnostics")
+
+    @property
+    def has_errors(self) -> bool:
+        return self.errors > 0 or any(d.severity in ("error", "fatal") for d in self.diagnostics)
+
+    @property
+    def has_warnings(self) -> bool:
+        return self.warnings > 0 or any(d.severity == "warning" for d in self.diagnostics)
+
+
+# ---------------------------------------------------------------------------
 # Binary Locator
 # ---------------------------------------------------------------------------
 
@@ -509,6 +548,97 @@ def run_check(
     )
 
 
+def run_lint(
+    path: Union[str, Path],
+    bin_path: Optional[Union[str, Path]] = None,
+    fix: bool = False,
+) -> LintReport:
+    """Execute `rhp lint <path> --format=json` and parse the lint diagnostics.
+
+    Args:
+        path: Target file or directory to lint.
+        bin_path: Optional custom path to the rhp binary.
+        fix: If True, pass --fix flag to attempt automatic lint fixing.
+
+    Returns:
+        LintReport containing lint errors, warnings, and suggested fixes.
+
+    Raises:
+        RhpNotFoundError: If rhp binary cannot be found.
+        RhpExecutionError: If rhp crashes or terminates with internal error code.
+    """
+    rhp_bin = get_rhp_binary(bin_path)
+    target = Path(path)
+
+    cmd = [
+        str(rhp_bin),
+        "lint",
+        str(target),
+        "--format=json",
+    ]
+    if fix:
+        cmd.append("--fix")
+
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    stdout = proc.stdout.strip()
+    if proc.returncode >= 2 and not stdout:
+        raise RhpExecutionError(
+            f"rhp lint internal error (exit code {proc.returncode}): {proc.stderr}",
+            returncode=proc.returncode,
+            cmd=cmd,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+        )
+
+    diagnostics: list[LintDiagnostic] = []
+    errors = 0
+    warnings = 0
+    status = "ok"
+
+    if stdout:
+        try:
+            data = json.loads(stdout)
+            if isinstance(data, dict):
+                if "diagnostics" in data:
+                    return LintReport.model_validate(data)
+                diag = LintDiagnostic.model_validate(data)
+                diagnostics.append(diag)
+            elif isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        diagnostics.append(LintDiagnostic.model_validate(item))
+        except json.JSONDecodeError:
+            for line in stdout.splitlines():
+                line_str = line.strip()
+                if not line_str:
+                    continue
+                try:
+                    item = json.loads(line_str)
+                    if isinstance(item, dict):
+                        diagnostics.append(LintDiagnostic.model_validate(item))
+                except json.JSONDecodeError:
+                    continue
+
+    errors = sum(1 for d in diagnostics if d.severity in ("error", "fatal"))
+    warnings = sum(1 for d in diagnostics if d.severity == "warning")
+    if errors > 0:
+        status = "error"
+
+    return LintReport(
+        target_path=str(target),
+        status=status,
+        errors=errors,
+        warnings=warnings,
+        diagnostics=diagnostics,
+    )
+
+
 def run_script(
     path: Union[str, Path],
     args: Optional[Sequence[str]] = None,
@@ -581,6 +711,18 @@ class RhpCli:
             dry_run=dry_run,
             php_version=php_version,
             bin_path=self._custom_bin,
+        )
+
+    def lint(
+        self,
+        path: Union[str, Path],
+        fix: bool = False,
+    ) -> LintReport:
+        """Execute `rhp lint`."""
+        return run_lint(
+            path=path,
+            bin_path=self._custom_bin,
+            fix=fix,
         )
 
     def check(self, path: Union[str, Path]) -> CheckReport:
