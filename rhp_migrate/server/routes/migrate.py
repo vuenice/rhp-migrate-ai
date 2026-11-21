@@ -236,6 +236,10 @@ async def migrate_stream_endpoint(
             # Stage 1: AST Parsing & Readiness
             # ---------------------------------------------------------------
             yield format_sse(
+                "status",
+                {"step": "analyzing", "message": f"Analyzing AST and readiness for {file_path.name}"},
+            )
+            yield format_sse(
                 "ast_parsing",
                 {
                     "stage": "ast_parsing",
@@ -279,6 +283,10 @@ async def migrate_stream_endpoint(
             # Stage 2: Initial RHP Draft (Deterministic + LLM Migration)
             # ---------------------------------------------------------------
             yield format_sse(
+                "status",
+                {"step": "transpiling", "message": "Transpiling PHP code into strictly typed RHP"},
+            )
+            yield format_sse(
                 "initial_rhp_draft",
                 {
                     "stage": "initial_rhp_draft",
@@ -315,6 +323,7 @@ async def migrate_stream_endpoint(
                     ai_resp = llm_runner.migrate_unit(
                         unit_identifier=unit.identifier,
                         code=unit.code,
+                        extra_instructions=req.user_instruction,
                     )
                     transformed = clean_code_fence(ai_resp.result.transformed_code)
                     if transformed and transformed != unit.code:
@@ -336,6 +345,13 @@ async def migrate_stream_endpoint(
                 except Exception as exc:
                     healing_log.append(f"LLM migration failed for {unit.identifier}: {exc}")
 
+            # Stream incremental code chunks
+            chunk_size = 64
+            for i in range(0, len(current_content), chunk_size):
+                chunk = current_content[i : i + chunk_size]
+                yield format_sse("code_chunk", {"chunk": chunk})
+                await asyncio.sleep(0.005)
+
             yield format_sse(
                 "initial_rhp_draft",
                 {
@@ -356,6 +372,10 @@ async def migrate_stream_endpoint(
             # Stage 3: Compiler Check Output
             # ---------------------------------------------------------------
             yield format_sse(
+                "status",
+                {"step": "compiling", "message": "Executing deterministic syntax verification and compiler check"},
+            )
+            yield format_sse(
                 "compiler_check",
                 {
                     "stage": "compiler_check",
@@ -375,6 +395,17 @@ async def migrate_stream_endpoint(
             )
             is_valid = audit_record.is_valid and is_syntactically_valid(current_content)
             compiler_errors = [f"line {e.line}:{e.column}: {e.message}" for e in audit_record.errors]
+            typed_diagnostics = [
+                {
+                    "line": e.line,
+                    "col": e.column,
+                    "message": e.message,
+                }
+                for e in audit_record.errors
+            ]
+
+            # Emit typed diagnostic errors for frontend editor gutter highlighting
+            yield format_sse("diagnostic", {"errors": typed_diagnostics})
 
             yield format_sse(
                 "compiler_check",
@@ -390,35 +421,61 @@ async def migrate_stream_endpoint(
             )
             await asyncio.sleep(0.01)
 
-            # Optional healing attempt if invalid
-            if not is_valid and audit_record.errors and req.max_retries > 0:
-                try:
-                    failing_line = audit_record.errors[0].line
-                    unit = find_code_unit(current_content, failing_line, file_path=file_path)
-                    heal_resp = llm_runner.migrate_unit(
-                        unit_identifier=unit.identifier,
-                        code=unit.code,
-                        compiler_errors=compiler_errors,
-                    )
-                    healed = clean_code_fence(heal_resp.result.transformed_code)
-                    if healed and healed != unit.code:
-                        current_content = replace_unit_in_source(current_content, unit, healed)
-                        healing_log.append(f"Healed unit {unit.identifier}")
-                        # Re-verify
-                        re_audit = validator.validate(
-                            before_code=original_code,
-                            after_code=current_content,
-                            file_path=file_path,
-                            bin_path=rhp_bin,
-                        )
-                        is_valid = re_audit.is_valid and is_syntactically_valid(current_content)
-                except Exception as exc:
-                    healing_log.append(f"Healing retry failed: {exc}")
-
             # ---------------------------------------------------------------
-            # Stage 4: Critic Reflection
+            # Stage 4: Critic Loop for Automated Repair
             # ---------------------------------------------------------------
             critic_data: Optional[dict[str, Any]] = None
+            if not is_valid and audit_record.errors:
+                yield format_sse(
+                    "status",
+                    {"step": "critic_review", "message": "Passing compiler diagnostics to Critic loop for automated repair"},
+                )
+                if req.max_retries > 0:
+                    try:
+                        failing_line = audit_record.errors[0].line
+                        unit = find_code_unit(current_content, failing_line, file_path=file_path)
+                        heal_resp = llm_runner.migrate_unit(
+                            unit_identifier=unit.identifier,
+                            code=unit.code,
+                            compiler_errors=compiler_errors,
+                            extra_instructions=req.user_instruction,
+                        )
+                        healed = clean_code_fence(heal_resp.result.transformed_code)
+                        if healed and healed != unit.code:
+                            current_content = replace_unit_in_source(current_content, unit, healed)
+                            healing_log.append(f"Healed unit {unit.identifier}")
+
+                            # Stream healed code chunks
+                            for i in range(0, len(current_content), chunk_size):
+                                chunk = current_content[i : i + chunk_size]
+                                yield format_sse("code_chunk", {"chunk": chunk})
+                                await asyncio.sleep(0.005)
+
+                            # Re-verify
+                            re_audit = validator.validate(
+                                before_code=original_code,
+                                after_code=current_content,
+                                file_path=file_path,
+                                bin_path=rhp_bin,
+                            )
+                            is_valid = re_audit.is_valid and is_syntactically_valid(current_content)
+                            re_typed = [
+                                {
+                                    "line": e.line,
+                                    "col": e.column,
+                                    "message": e.message,
+                                }
+                                for e in re_audit.errors
+                            ]
+                            yield format_sse("diagnostic", {"errors": re_typed})
+                    except Exception as exc:
+                        healing_log.append(f"Healing retry failed: {exc}")
+            elif req.run_critic:
+                yield format_sse(
+                    "status",
+                    {"step": "critic_review", "message": "Running AI Continuous Improvement Critic evaluation"},
+                )
+
             if req.run_critic:
                 yield format_sse(
                     "critic_reflection",
@@ -458,10 +515,25 @@ async def migrate_stream_endpoint(
                 await asyncio.sleep(0.01)
 
             # ---------------------------------------------------------------
-            # Stage 5: Final Verified RHP Code
+            # Stage 5: Final Verified RHP Code & Complete
             # ---------------------------------------------------------------
             file_todos = len(re.findall(r"//\s*RHP-TODO", current_content))
             todos_marked = max(todos_marked, file_todos)
+
+            # Emit typed status: done
+            yield format_sse(
+                "status",
+                {"step": "done", "message": "Migration completed successfully."},
+            )
+
+            # Emit typed complete event
+            yield format_sse(
+                "complete",
+                {
+                    "final_code": current_content,
+                    "verified": is_valid,
+                },
+            )
 
             yield format_sse(
                 "final_code",

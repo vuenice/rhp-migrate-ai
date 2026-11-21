@@ -34,6 +34,10 @@ interface AICopilotPanelProps {
   onSendMessage: (message: string) => void;
   onClearLogs?: () => void;
   onRunCompilerCheck?: () => void;
+  onAcceptAndNext?: () => void;
+  onRepromptCritic?: () => void;
+  diagnosticsCount?: number;
+  migrationStep?: string;
 }
 
 const QUICK_PROMPTS = [
@@ -52,6 +56,10 @@ export function AICopilotPanel({
   onSendMessage,
   onClearLogs,
   onRunCompilerCheck,
+  onAcceptAndNext,
+  onRepromptCritic,
+  diagnosticsCount = 0,
+  migrationStep = "idle",
 }: AICopilotPanelProps) {
   const [inputText, setInputText] = useState("");
   const [showDiagnostics, setShowDiagnostics] = useState(false);
@@ -349,6 +357,42 @@ export function AICopilotPanel({
           </div>
         </div>
       </div>
+
+      {/* Interactive Critic & Workflow Action Buttons */}
+      {(onRepromptCritic || onAcceptAndNext) && (
+        <div className="px-3 pt-2 pb-1 border-t border-neutral-800 bg-neutral-950 flex items-center gap-2">
+          {onRepromptCritic && (
+            <button
+              type="button"
+              onClick={onRepromptCritic}
+              disabled={isStreaming}
+              title="Re-prompt Critic loop with compiler diagnostics for automated repair"
+              className="flex-1 flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-amber-600/40 bg-amber-950/40 text-amber-300 hover:bg-amber-900/50 hover:text-amber-100 disabled:opacity-50 transition-colors font-medium text-[11px] shadow-sm"
+            >
+              <Sparkles className="h-3 w-3 text-amber-400" />
+              <span>Re-prompt with Critic</span>
+              {diagnosticsCount > 0 && (
+                <span className="px-1 py-0.2 rounded bg-amber-500/20 text-[10px] font-mono border border-amber-500/30">
+                  {diagnosticsCount}
+                </span>
+              )}
+            </button>
+          )}
+
+          {onAcceptAndNext && (
+            <button
+              type="button"
+              onClick={onAcceptAndNext}
+              disabled={isStreaming}
+              title="Accept current RHP code and advance to next pending file"
+              className="flex-1 flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50 transition-colors font-medium text-[11px] shadow-sm"
+            >
+              <Check className="h-3.5 w-3.5 text-emerald-200" />
+              <span>Accept &amp; Next File</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Quick Prompts Chips */}
       <div className="px-3 pt-2 pb-1 border-t border-neutral-800 bg-neutral-950/70">

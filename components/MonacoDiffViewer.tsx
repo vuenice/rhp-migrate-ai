@@ -14,8 +14,13 @@ import {
   AlertTriangle,
   Loader2,
   Sparkles,
+  ArrowRight,
+  CheckCircle2,
+  RefreshCw,
+  AlertCircle,
 } from "lucide-react";
 import { FileItem, FileStatus } from "@/types/workbench";
+import { DiagnosticError, MigrationStep } from "@/hooks/useMigrationStream";
 
 // Dynamically import Monaco DiffEditor to prevent SSR window issues in Next.js
 const DiffEditor = dynamic(
@@ -41,6 +46,13 @@ interface MonacoDiffViewerProps {
   isStreaming?: boolean;
   onMigrateClick?: () => void;
   onVerifyClick?: () => void;
+  onMount?: (editor: any, monaco: any) => void;
+  onAcceptAndNext?: () => void;
+  onRepromptCritic?: () => void;
+  migrationStep?: MigrationStep;
+  diagnostics?: DiagnosticError[];
+  isVerified?: boolean | null;
+  hasNextFile?: boolean;
 }
 
 export function MonacoDiffViewer({
@@ -51,18 +63,38 @@ export function MonacoDiffViewer({
   isStreaming = false,
   onMigrateClick,
   onVerifyClick,
+  onMount,
+  onAcceptAndNext,
+  onRepromptCritic,
+  migrationStep = "idle",
+  diagnostics = [],
+  isVerified = null,
+  hasNextFile = false,
 }: MonacoDiffViewerProps) {
   const [copied, setCopied] = useState(false);
   const [renderSideBySide, setRenderSideBySide] = useState(true);
   const diffEditorRef = useRef<any>(null);
 
-  // Handle editor mount
-  const handleEditorDidMount = (editor: any) => {
+  // Handle editor mount with editor & monaco instances
+  const handleEditorDidMount = (editor: any, monaco: any) => {
     diffEditorRef.current = editor;
 
-    // Get modified editor instance to listen for user typing
+    if (onMount) {
+      onMount(editor, monaco);
+    }
+
+    // Get modified editor instance to configure gutter margin & listen for typing
     const modifiedEditor = editor.getModifiedEditor();
     if (modifiedEditor) {
+      try {
+        modifiedEditor.updateOptions({
+          glyphMargin: true,
+          lightbulb: { enabled: true },
+        });
+      } catch {
+        // ignore
+      }
+
       modifiedEditor.onDidChangeModelContent(() => {
         const val = modifiedEditor.getValue();
         if (onChangeModified) {
@@ -214,18 +246,56 @@ export function MonacoDiffViewer({
             </button>
           )}
 
+          {/* Re-prompt with Critic button */}
+          {onRepromptCritic && (
+            <button
+              type="button"
+              onClick={onRepromptCritic}
+              disabled={isStreaming}
+              title="Re-prompt Critic loop with compiler diagnostics for automated repair"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded border border-amber-600/40 bg-amber-950/40 text-amber-300 hover:bg-amber-900/50 hover:text-amber-100 disabled:opacity-50 transition-colors font-medium text-[11px] shadow-sm"
+            >
+              <RefreshCw
+                className={`h-3 w-3 ${
+                  isStreaming && migrationStep === "critic_review" ? "animate-spin" : ""
+                }`}
+              />
+              <span>Re-prompt with Critic</span>
+              {diagnostics.length > 0 && (
+                <span className="px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[10px] font-mono border border-amber-500/30">
+                  {diagnostics.length}
+                </span>
+              )}
+            </button>
+          )}
+
+          {/* Accept & Next File button */}
+          {onAcceptAndNext && (
+            <button
+              type="button"
+              onClick={onAcceptAndNext}
+              disabled={isStreaming}
+              title="Accept current RHP code and advance to next pending file"
+              className="flex items-center gap-1.5 px-3 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50 shadow-sm font-medium transition-colors text-[11px]"
+            >
+              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-200" />
+              <span>Accept &amp; Next File</span>
+              <ArrowRight className="h-3 w-3" />
+            </button>
+          )}
+
           {/* AI Migrate Button */}
           {onMigrateClick && (
             <button
               type="button"
               onClick={onMigrateClick}
               disabled={isStreaming}
-              className="flex items-center gap-1.5 px-3 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50 shadow-sm font-medium transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1 rounded bg-sky-600 text-white hover:bg-sky-500 disabled:opacity-50 shadow-sm font-medium transition-colors text-[11px]"
             >
               {isStreaming ? (
                 <>
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  <span className="text-[11px]">Generating...</span>
+                  <span className="text-[11px]">Streaming...</span>
                 </>
               ) : (
                 <>
@@ -237,6 +307,92 @@ export function MonacoDiffViewer({
           )}
         </div>
       </div>
+
+      {/* Reactive State Machine Indicator Banner */}
+      {migrationStep !== "idle" && (
+        <div className="flex items-center justify-between px-4 py-1.5 bg-neutral-900 border-b border-neutral-800 text-xs">
+          <div className="flex items-center gap-3">
+            <span className="text-[10px] uppercase tracking-wider font-semibold text-neutral-400">
+              Migration State:
+            </span>
+            <div className="flex items-center gap-1.5 font-mono text-[11px]">
+              {/* 1. analyzing */}
+              <span
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-full border ${
+                  migrationStep === "analyzing"
+                    ? "bg-sky-950/80 text-sky-300 border-sky-600 animate-pulse"
+                    : migrationStep === "transpiling" ||
+                      migrationStep === "compiling" ||
+                      migrationStep === "critic_review" ||
+                      migrationStep === "done"
+                    ? "bg-emerald-950/40 text-emerald-400 border-emerald-800/60"
+                    : "text-neutral-500 border-neutral-800"
+                }`}
+              >
+                1. AST Analysis
+              </span>
+              <span className="text-neutral-600">➔</span>
+
+              {/* 2. transpiling */}
+              <span
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-full border ${
+                  migrationStep === "transpiling"
+                    ? "bg-sky-950/80 text-sky-300 border-sky-600 animate-pulse"
+                    : migrationStep === "compiling" ||
+                      migrationStep === "critic_review" ||
+                      migrationStep === "done"
+                    ? "bg-emerald-950/40 text-emerald-400 border-emerald-800/60"
+                    : "text-neutral-500 border-neutral-800"
+                }`}
+              >
+                2. Transpiling RHP
+              </span>
+              <span className="text-neutral-600">➔</span>
+
+              {/* 3. compiling */}
+              <span
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-full border ${
+                  migrationStep === "compiling"
+                    ? "bg-sky-950/80 text-sky-300 border-sky-600 animate-pulse"
+                    : migrationStep === "critic_review" || migrationStep === "done"
+                    ? diagnostics.length > 0
+                      ? "bg-amber-950/40 text-amber-300 border-amber-800/60"
+                      : "bg-emerald-950/40 text-emerald-400 border-emerald-800/60"
+                    : "text-neutral-500 border-neutral-800"
+                }`}
+              >
+                3. Compiler Verify
+              </span>
+              <span className="text-neutral-600">➔</span>
+
+              {/* 4. critic_review / done */}
+              <span
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-full border ${
+                  migrationStep === "critic_review"
+                    ? "bg-purple-950/80 text-purple-300 border-purple-600 animate-pulse"
+                    : migrationStep === "done"
+                    ? isVerified
+                      ? "bg-emerald-950/80 text-emerald-400 border-emerald-500"
+                      : "bg-amber-950/80 text-amber-300 border-amber-500"
+                    : "text-neutral-500 border-neutral-800"
+                }`}
+              >
+                4. Critic Loop &amp; Done
+              </span>
+            </div>
+          </div>
+
+          {/* Diagnostic gutter marker status pill */}
+          {diagnostics.length > 0 && (
+            <div className="flex items-center gap-1 text-[11px] font-mono text-amber-400 bg-amber-950/60 px-2.5 py-0.5 rounded border border-amber-800/80">
+              <AlertCircle className="h-3 w-3 text-amber-400 shrink-0" />
+              <span>
+                {diagnostics.length} gutter error marker{diagnostics.length > 1 ? "s" : ""} flagged
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Pane Labels */}
       <div className="grid grid-cols-2 bg-neutral-950 border-b border-neutral-800/80 text-[11px] font-mono select-none">
