@@ -201,12 +201,79 @@ def test_migrate_stream_sse_events():
         assert "final_code" in event_names
         assert "done" in event_names
 
+        # Verify new typed SSE schema events
+        assert "status" in event_names
+        assert "code_chunk" in event_names
+        assert "complete" in event_names
+        assert "diagnostic" in event_names
+
+        # Verify status steps sequence
+        status_steps = [data["step"] for name, data in events if name == "status"]
+        assert "analyzing" in status_steps
+        assert "transpiling" in status_steps
+        assert "compiling" in status_steps
+        assert "done" in status_steps
+
+        # Verify code_chunk payloads
+        code_chunks = [data["chunk"] for name, data in events if name == "code_chunk"]
+        assert len(code_chunks) > 0
+        reconstructed = "".join(code_chunks)
+        assert len(reconstructed) > 0
+
+        # Verify complete event schema
+        complete_events = [data for name, data in events if name == "complete"]
+        assert len(complete_events) == 1
+        assert "final_code" in complete_events[0]
+        assert "verified" in complete_events[0]
+        assert complete_events[0]["verified"] is True
+
         # Check final_code event payload
         final_code_events = [data for name, data in events if name == "final_code"]
         assert len(final_code_events) > 0
         final_data = final_code_events[0]["data"]
         assert "final_code" in final_data
         assert final_data["is_verified"] is True
+
+
+def test_migrate_stream_diagnostic_compiler_error():
+    """Verify diagnostic event emits typed line, col, message on syntax or type defects."""
+    payload = {
+        "file_path": "app/Broken.php",
+        # Code that creates a syntax defect in deterministic parsing
+        "code": "<?php\nfunction broken($a) {\n    return eval($a);\n}\n",
+        "run_critic": True,
+        "max_retries": 1,
+    }
+    headers = {
+        "x-provider": "mock",
+        "x-model-name": "mock-model",
+        "x-api-key": "sk-mock-key",
+    }
+
+    with client.stream("POST", "/api/migrate/stream", json=payload, headers=headers) as stream:
+        assert stream.status_code == 200
+        events: list[tuple[str, dict]] = []
+        current_event = None
+
+        for line in stream.iter_lines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("event: "):
+                current_event = line.replace("event: ", "").strip()
+            elif line.startswith("data: ") and current_event:
+                raw_json = line.replace("data: ", "").strip()
+                events.append((current_event, json.loads(raw_json)))
+                current_event = None
+
+        diag_events = [data for name, data in events if name == "diagnostic"]
+        assert len(diag_events) >= 1
+        for diag in diag_events:
+            assert "errors" in diag
+            for err in diag["errors"]:
+                assert "line" in err
+                assert "col" in err
+                assert "message" in err
 
 
 # ---------------------------------------------------------------------------

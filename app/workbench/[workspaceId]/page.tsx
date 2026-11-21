@@ -22,6 +22,7 @@ import {
   ChatMessage,
   BYOKConfig,
 } from "@/types/workbench";
+import { useMigrationStream } from "@/hooks/useMigrationStream";
 import {
   getStoredBYOKConfig,
   buildBYOKHeaders,
@@ -322,7 +323,6 @@ export default function WorkbenchPage() {
   const [originalCode, setOriginalCode] = useState<string>("");
   const [modifiedCode, setModifiedCode] = useState<string>("");
   const [isTreeLoading, setIsTreeLoading] = useState(false);
-  const [isStreaming, setIsStreaming] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [byokConfig, setByokConfig] = useState<BYOKConfig>(getStoredBYOKConfig());
 
@@ -541,17 +541,106 @@ export default function WorkbenchPage() {
     }, 700);
   };
 
-  // Perform AI Migration with SSE Streaming or Client Fallback
+  // Collect all files in flat list to determine next file
+  const getAllFiles = useCallback((items: FileItem[]): FileItem[] => {
+    let result: FileItem[] = [];
+    for (const item of items) {
+      if (item.type === "file") {
+        result.push(item);
+      }
+      if (item.children) {
+        result = result.concat(getAllFiles(item.children));
+      }
+    }
+    return result;
+  }, []);
+
+  const allFileList = getAllFiles(files);
+  const hasNextFile = allFileList.some(
+    (f) => f.path !== activeFile?.path && f.status !== "migrated"
+  );
+
+  // ---------------------------------------------------------------------------
+  // Reactive Migration Stream Hook with Real-Time Monaco Gutter Markers
+  // ---------------------------------------------------------------------------
+  const {
+    step: migrationStep,
+    isStreaming,
+    diagnostics,
+    verified: isVerified,
+    startMigration,
+    rePromptWithCritic,
+    setEditorInstance,
+  } = useMigrationStream({
+    filePath: activeFile?.path || "input.php",
+    originalCode,
+    byokConfig,
+    onChunk: (chunk, accumulated) => {
+      setModifiedCode(accumulated);
+    },
+    onStatusChange: (step) => {
+      if (activeFile) {
+        if (step === "analyzing" || step === "transpiling") {
+          updateFileStatus(activeFile.path, "analyzing");
+        } else if (step === "critic_review") {
+          updateFileStatus(activeFile.path, "warning");
+        } else if (step === "done") {
+          updateFileStatus(activeFile.path, "migrated");
+        }
+      }
+    },
+    onDiagnostic: (errors) => {
+      if (errors.length > 0 && activeFile) {
+        updateFileStatus(activeFile.path, "warning");
+      }
+      setScorecard((prev) =>
+        prev
+          ? {
+              ...prev,
+              diagnostics: errors.map((e) => ({
+                line: e.line,
+                column: e.col,
+                severity: "error",
+                message: e.message,
+              })),
+            }
+          : null
+      );
+    },
+    onComplete: (finalCode, verified) => {
+      setModifiedCode(finalCode);
+      if (activeFile) {
+        updateFileStatus(activeFile.path, verified ? "migrated" : "warning");
+      }
+      setScorecard((prev) =>
+        prev
+          ? {
+              ...prev,
+              readinessPercentage: verified ? 100 : Math.max(70, prev.readinessPercentage),
+              isMigrationReady: verified,
+            }
+          : null
+      );
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          id: Math.random().toString(36).substring(7),
+          role: "assistant",
+          content: verified
+            ? `Successfully migrated ${activeFile?.name || "file"} to strict RHP! Syntax and compiler checks passed.`
+            : `Migration completed for ${activeFile?.name || "file"} with compiler diagnostics. Click "Re-prompt with Critic" to auto-repair.`,
+          timestamp: new Date().toLocaleTimeString(),
+        },
+      ]);
+    },
+    onLog: (level, msg) => {
+      addCompilerLog(level, msg);
+    },
+  });
+
+  // Action: Trigger migration loop
   const handleMigrate = async (customInstruction?: string) => {
     if (!activeFile || isStreaming) return;
-
-    setIsStreaming(true);
-    updateFileStatus(activeFile.path, "analyzing");
-
-    const instruction = customInstruction || "Convert to strictly typed RHP with verified dict/vec shapes";
-    addCompilerLog("info", `Starting AI Migration loop: "${instruction}"`);
-
-    // Add user message if instruction was manually supplied
     if (customInstruction) {
       setChatMessages((prev) => [
         ...prev,
@@ -563,126 +652,50 @@ export default function WorkbenchPage() {
         },
       ]);
     }
-
-    try {
-      const headers = buildBYOKHeaders(byokConfig);
-
-      // Attempt SSE Stream call to backend
-      const response = await fetch("/api/migrate/stream", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...headers,
-        },
-        body: JSON.stringify({
-          file_path: activeFile.path,
-          code: originalCode,
-          user_instruction: instruction,
-          php_version: "8.2",
-          run_critic: true,
-        }),
-      });
-
-      if (response.ok && response.body) {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder("utf-8");
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n\n");
-          buffer = lines.pop() || "";
-
-          for (const block of lines) {
-            const dataMatch = block.match(/data:\s*(.*)/);
-            if (dataMatch && dataMatch[1]) {
-              try {
-                const event = JSON.parse(dataMatch[1]);
-                if (event.stage === "ast_parsing") {
-                  addCompilerLog("info", event.message || "AST parsed and diagnostics cataloged.");
-                } else if (event.stage === "initial_rhp_draft" && event.data?.code) {
-                  setModifiedCode(event.data.code);
-                  addCompilerLog("info", "Generated initial deterministic RHP draft.");
-                } else if (event.stage === "compiler_check") {
-                  addCompilerLog(
-                    event.data?.is_valid ? "success" : "warn",
-                    event.message || "Compiler check evaluated."
-                  );
-                } else if (event.stage === "final_code" && event.data?.final_code) {
-                  setModifiedCode(event.data.final_code);
-                  addCompilerLog("success", "Final compiled RHP code received.");
-                }
-              } catch {
-                // ignore parsing error for chunk
-              }
-            }
-          }
-        }
-
-        updateFileStatus(activeFile.path, "migrated");
-        setScorecard((prev) => (prev ? { ...prev, readinessPercentage: 98, isMigrationReady: true } : null));
-        addCompilerLog("success", `Migration complete for ${activeFile.name}!`);
-        setIsStreaming(false);
-        return;
-      }
-    } catch {
-      // Fallback streaming simulation if backend SSE endpoint is offline or not running
-    }
-
-    // Client-side simulation fallback: progressive streaming updates
-    setTimeout(() => {
-      addCompilerLog("info", "[ast] Extracting type signatures & converting arrays...");
-    }, 400);
-
-    setTimeout(() => {
-      addCompilerLog("info", "[llm] Applying RHP strict syntax transforms...");
-      const sample = SAMPLE_PHP_CODE[activeFile.path]?.rhp;
-      if (sample) {
-        setModifiedCode(sample);
-      } else {
-        const transpiled = originalCode
-          .replace(/<\?php/g, "<?rhp\n// Migrated to strict RHP")
-          .replace(/public function (\w+)\((.*?)\)/g, "public function $1($2): mixed")
-          .replace(/array /g, "dict<string, mixed> ");
-        setModifiedCode(transpiled);
-      }
-    }, 1200);
-
-    setTimeout(() => {
-      addCompilerLog("success", "[compiler] rhp check passed with 0 errors. Score: 96% Type Safe.");
-      updateFileStatus(activeFile.path, "migrated");
-      setScorecard((prev) =>
-        prev
-          ? {
-              ...prev,
-              readinessPercentage: 96,
-              unsupportedCount: 0,
-              untypedParamCount: 0,
-              isMigrationReady: true,
-            }
-          : null
-      );
-
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          id: Math.random().toString(36).substring(7),
-          role: "assistant",
-          content: `Successfully migrated ${activeFile.name} to RHP! All dynamic PHP arrays were converted into strict 'dict<string, mixed>' structures and compiler verified.`,
-          timestamp: new Date().toLocaleTimeString(),
-          stats: {
-            deterministicEdits: 4,
-            todosMarked: 0,
-          },
-        },
-      ]);
-
-      setIsStreaming(false);
-    }, 2000);
+    await startMigration(customInstruction);
   };
+
+  // Action: Re-prompt with Critic
+  const handleRepromptCritic = async () => {
+    if (!activeFile || isStreaming) return;
+    addCompilerLog("info", "Re-prompting Critic loop with compiler diagnostics for automated repair...");
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: Math.random().toString(36).substring(7),
+        role: "user",
+        content: `Re-prompt Critic: Repair compiler diagnostics (${diagnostics.length} issue(s) detected)`,
+        timestamp: new Date().toLocaleTimeString(),
+      },
+    ]);
+    await rePromptWithCritic();
+  };
+
+  // Action: Accept & Next File
+  const handleAcceptAndNext = useCallback(() => {
+    if (!activeFile) return;
+
+    // 1. Mark current file as migrated
+    updateFileStatus(activeFile.path, "migrated");
+    addCompilerLog("success", `Accepted RHP migration for ${activeFile.name}`);
+
+    // 2. Find next pending / non-migrated file
+    const flatFiles = getAllFiles(files);
+    const currentIndex = flatFiles.findIndex((f) => f.path === activeFile.path);
+    const remainingFiles = flatFiles.filter(
+      (f, idx) => idx > currentIndex && f.status !== "migrated"
+    );
+    const nextFile =
+      remainingFiles[0] ||
+      flatFiles.find((f) => f.status !== "migrated" && f.path !== activeFile.path);
+
+    if (nextFile) {
+      addCompilerLog("info", `Advancing to next file: ${nextFile.path}`);
+      handleSelectFile(nextFile);
+    } else {
+      addCompilerLog("success", "All files in workspace successfully migrated to RHP!");
+    }
+  }, [activeFile, files, getAllFiles, updateFileStatus, addCompilerLog]);
 
   const handleSendMessage = (msg: string) => {
     handleMigrate(msg);
@@ -758,6 +771,13 @@ export default function WorkbenchPage() {
             isStreaming={isStreaming}
             onMigrateClick={() => handleMigrate()}
             onVerifyClick={handleRunCompilerCheck}
+            onMount={setEditorInstance}
+            onAcceptAndNext={handleAcceptAndNext}
+            onRepromptCritic={handleRepromptCritic}
+            migrationStep={migrationStep}
+            diagnostics={diagnostics}
+            isVerified={isVerified}
+            hasNextFile={hasNextFile}
           />
         </div>
 
@@ -772,6 +792,10 @@ export default function WorkbenchPage() {
             onSendMessage={handleSendMessage}
             onClearLogs={() => setCompilerLogs([])}
             onRunCompilerCheck={handleRunCompilerCheck}
+            onAcceptAndNext={handleAcceptAndNext}
+            onRepromptCritic={handleRepromptCritic}
+            diagnosticsCount={diagnostics.length}
+            migrationStep={migrationStep}
           />
         </div>
       </div>

@@ -167,7 +167,7 @@ class MigrateFileResponse(BaseModel):
 
 class MigrateStreamRequest(BaseModel):
     """Payload for POST /api/migrate/stream."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     file_path: Optional[str] = Field(
         "input.php",
@@ -176,6 +176,10 @@ class MigrateStreamRequest(BaseModel):
     code: str = Field(
         ...,
         description="Source PHP code to stream migration for",
+    )
+    user_instruction: Optional[str] = Field(
+        None,
+        description="Optional custom user instruction or re-prompt for Critic loop",
     )
     php_version: Optional[str] = Field(
         "8.2",
@@ -191,6 +195,15 @@ class MigrateStreamRequest(BaseModel):
         le=5,
         description="Maximum compiler healing retries",
     )
+
+
+class SSEDiagnosticError(BaseModel):
+    """Diagnostic compiler error emitted in SSE stream."""
+    model_config = ConfigDict(extra="ignore")
+
+    line: int
+    col: int
+    message: str
 
 
 class StreamProgressEvent(BaseModel):
