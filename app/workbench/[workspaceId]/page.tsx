@@ -788,6 +788,8 @@ export default function WorkbenchPage() {
             compilerLogs={compilerLogs}
             chatMessages={chatMessages}
             activeFile={activeFile}
+            activeCode={modifiedCode || originalCode}
+            workspaceId={workspaceId}
             isStreaming={isStreaming}
             onSendMessage={handleSendMessage}
             onClearLogs={() => setCompilerLogs([])}

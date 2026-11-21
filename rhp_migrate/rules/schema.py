@@ -46,6 +46,7 @@ class Rule(BaseModel):
     doc_url: Optional[str] = Field(None, description="URL pointing to documentation or reference")
     llm_prompt_guidance: Optional[str] = Field(None, description="Guidance for the LLM when executing this migration")
     examples: list[RuleExample] = Field(default_factory=list, description="Code examples for before/after migration")
+    tags: list[str] = Field(default_factory=list, description="Tags for AST matching and targeted retrieval")
 
     def format_prompt_block(self) -> str:
         """Format this rule as a markdown block for inclusion in LLM prompts."""

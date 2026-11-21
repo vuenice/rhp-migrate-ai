@@ -3,6 +3,8 @@ rules:
     title: Remove PHP tags
     category: SYNTAX
     strategy: DETERMINISTIC
+    tags:
+      - has_php_tags
     php_pattern: "PHP opening (<?php, <?=, <?) and closing (?>) tags"
     rhp_replacement: "Direct source execution without tags"
     unsupported: false
@@ -21,6 +23,8 @@ rules:
     title: Remove declare statements
     category: SYNTAX
     strategy: DETERMINISTIC
+    tags:
+      - has_declare_statements
     php_pattern: "declare(strict_types=1); or declare(ticks=...);"
     rhp_replacement: null
     unsupported: false
@@ -43,6 +47,8 @@ rules:
     title: Replace strict equality with standard equality
     category: SYNTAX
     strategy: DETERMINISTIC
+    tags:
+      - has_strict_equality
     php_pattern: "$a === $b or $a !== $b"
     rhp_replacement: "$a == $b or $a != $b"
     unsupported: false
@@ -63,6 +69,8 @@ rules:
     title: Replace string concatenation operators
     category: SYNTAX
     strategy: DETERMINISTIC
+    tags:
+      - has_string_concat
     php_pattern: "$a . $b or $a .= $b"
     rhp_replacement: "$a + $b or $a += $b"
     unsupported: false
@@ -83,6 +91,8 @@ rules:
     title: Replace list() destructuring with bracket syntax
     category: SYNTAX
     strategy: DETERMINISTIC
+    tags:
+      - has_list_destructure
     php_pattern: "list($a, $b) = $array"
     rhp_replacement: "[$a, $b] = $array"
     unsupported: false
@@ -99,6 +109,8 @@ rules:
     title: Replace foreach with for-in loop
     category: SYNTAX
     strategy: DETERMINISTIC
+    tags:
+      - has_foreach
     php_pattern: "foreach ($collection as $item) or foreach ($collection as $key => $val)"
     rhp_replacement: "for ($item in $collection) or for ($key, $val in $collection)"
     unsupported: false
@@ -125,6 +137,8 @@ rules:
     title: Convert procedural cURL to fluent Http facade
     category: HTTP_FACADE
     strategy: LLM_ASSIST
+    tags:
+      - has_curl
     php_pattern: "curl_init(), curl_setopt(), curl_exec(), curl_close()"
     rhp_replacement: "Http::get(), Http::post(), Http::withHeaders()->..."
     unsupported: false
@@ -149,6 +163,8 @@ rules:
     title: Replace superglobals with Request facade
     category: HTTP_FACADE
     strategy: DETERMINISTIC
+    tags:
+      - has_superglobals
     php_pattern: "$_GET['k'], $_POST['k'], $_REQUEST['k']"
     rhp_replacement: "Request::query('k'), Request::body('k'), Request::input('k')"
     unsupported: false
@@ -167,6 +183,10 @@ rules:
     title: Use prefix type syntax for variable declarations
     category: TYPE_SYSTEM
     strategy: DETERMINISTIC
+    tags:
+      - has_dynamic_arrays
+      - has_prefix_types
+      - has_typed_vars
     php_pattern: "$var: Type = value; or Type $var = value;"
     rhp_replacement: "Type $var = value;"
     unsupported: false
@@ -185,6 +205,9 @@ rules:
     title: Extract HTML snippets and echo buffers to Rade templates
     category: TEMPLATES
     strategy: LLM_ASSIST
+    tags:
+      - has_echo_or_html
+      - has_output_buffering
     php_pattern: "echo '<div>...</div>'; or inline HTML or ob_start() buffer with HTML markup"
     rhp_replacement: "View::render('template.name', $data) or Response::html(View::render(...))"
     unsupported: false
@@ -198,10 +221,6 @@ rules:
           }
           $html = ob_get_clean();
         after: |
-          // Extracted to companion template resources/views/partials/items.rade.rhp:
-          // @foreach ($items as $item)
-          //     <li>{{ $item['name'] }}</li>
-          // @endforeach
           string $html = View::render('partials.items', ['items' => $items]);
         explanation: "HTML buffer loops extracted to declarative .rade.rhp templates with View::render()."
 
@@ -209,6 +228,8 @@ rules:
     title: Reflection API unsupported
     category: UNSUPPORTED
     strategy: MANUAL_REWRITE
+    tags:
+      - has_reflection
     php_pattern: "ReflectionClass, ReflectionMethod, ReflectionProperty, ReflectionFunction"
     rhp_replacement: null
     unsupported: true
@@ -219,8 +240,6 @@ rules:
           $reflector = new ReflectionClass(UserService::class);
           $hasMethod = $reflector->hasMethod('authenticate');
         after: |
-          // TODO: [RHP-UNSUP-001] Reflection is unsupported in RHP.
-          // Replace with compile-time container registration or explicit interface checks.
           $hasMethod = method_exists(UserService::class, 'authenticate');
         explanation: "Reflection API is rejected at compilation; replace with static analysis or interface constraints."
 
@@ -228,6 +247,8 @@ rules:
     title: Output buffering unsupported (migrate to Rade or View::render)
     category: UNSUPPORTED
     strategy: MANUAL_REWRITE
+    tags:
+      - has_output_buffering
     php_pattern: "ob_start(), ob_get_clean(), ob_get_contents(), ob_end_flush()"
     rhp_replacement: "View::render('path.name', $data) or Response::html(...)"
     unsupported: true
@@ -246,7 +267,8 @@ rules:
     title: Dynamic and standalone file inclusion unsupported
     category: UNSUPPORTED
     strategy: MANUAL_REWRITE
-
+    tags:
+      - has_dynamic_includes
     php_pattern: "include $file, require $file, include 'file.php', require 'header.php'"
     rhp_replacement: "View::render('view.name') or @include('view.name') or static imports"
     unsupported: true
@@ -262,3 +284,76 @@ rules:
           $handler->execute();
         explanation: "Dynamic require/include must be refactored into static imports, class autoloading, or registry lookups."
 
+  - id: RHP-TRAIT-001
+    title: Trait composition and compile-time contract inlining
+    category: TYPE_SYSTEM
+    strategy: LLM_ASSIST
+    tags:
+      - has_traits
+    php_pattern: "trait TraitName { ... } or use TraitName; inside class"
+    rhp_replacement: "Trait inlining with explicit typed contracts"
+    unsupported: false
+    doc_url: "https://rhp.dev/docs/syntax/traits"
+    llm_prompt_guidance: "Traits in RHP are verified and inlined ahead-of-time. Ensure all trait methods have strict return and parameter types, and conflicting signatures are resolved with explicit class implementations."
+    examples:
+      - before: |
+          trait Loggable {
+              public function log($message) {
+                  echo $message;
+              }
+          }
+        after: |
+          trait Loggable {
+              public function log(string $message): void {
+                  Log::info($message);
+              }
+          }
+        explanation: "Add strict parameter and return types to trait methods."
+
+  - id: RHP-EXC-001
+    title: Strict typed exception handling
+    category: TYPE_SYSTEM
+    strategy: LLM_ASSIST
+    tags:
+      - has_exceptions
+    php_pattern: "throw new Exception(...) or catch (Exception $e)"
+    rhp_replacement: "throw new SpecificException(...) or catch (Throwable $e)"
+    unsupported: false
+    doc_url: "https://rhp.dev/docs/syntax/exceptions"
+    llm_prompt_guidance: "Catch blocks and throws in RHP require explicit Throwable or specific Exception subclasses with strict type safety."
+    examples:
+      - before: |
+          try {
+              doWork();
+          } catch (Exception $e) {
+              logError($e->getMessage());
+          }
+        after: |
+          try {
+              doWork();
+          } catch (Throwable $e) {
+              Log::error($e->getMessage());
+          }
+        explanation: "Catch explicit Throwable types with strict logging in RHP."
+
+  - id: RHP-ELOQ-001
+    title: Migrate Eloquent scopes to typed query builder methods
+    category: TYPE_SYSTEM
+    strategy: LLM_ASSIST
+    tags:
+      - uses_eloquent_scopes
+    php_pattern: "public function scopeActive($query)"
+    rhp_replacement: "public static function scopeActive(Builder $query): Builder"
+    unsupported: false
+    doc_url: "https://rhp.dev/docs/orm/scopes"
+    llm_prompt_guidance: "Transform dynamic Eloquent scopes into statically typed methods taking and returning Builder instances."
+    examples:
+      - before: |
+          public function scopeActive($query) {
+              return $query->where('status', 'active');
+          }
+        after: |
+          public function scopeActive(Builder $query): Builder {
+              return $query->where('status', 'active');
+          }
+        explanation: "Add strict Builder type hints and return types to Eloquent query scopes."

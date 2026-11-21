@@ -20,6 +20,7 @@ from rhp_migrate.ai.prompts import (
     build_system_prompt,
     build_user_prompt,
 )
+from rhp_migrate.rules.schema import Rule
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -590,14 +591,23 @@ class LLMRunner:
         Returns:
             AIMigrationResponse containing result, usage, and cost estimates.
         """
-        system_prompt = build_system_prompt()
+        target_rules = rules
+        if target_rules is None:
+            try:
+                from rhp_migrate.rules.selector import select_rules
+                target_rules = select_rules(code)
+            except Exception:
+                target_rules = None
+
+        rule_objs = [r for r in target_rules if isinstance(r, Rule)] if target_rules else None
+        system_prompt = build_system_prompt(rules=rule_objs)
         user_prompt = build_user_prompt(
             unit_identifier=unit_identifier,
             code=code,
             ast_context=ast_context,
             caller_signatures=caller_signatures,
             class_properties=class_properties,
-            rules=rules,
+            rules=target_rules,
             compiler_errors=compiler_errors,
             extra_instructions=extra_instructions,
         )

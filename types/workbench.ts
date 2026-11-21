@@ -59,3 +59,44 @@ export interface ChatMessage {
     tokensUsed?: number;
   };
 }
+
+export interface RuleExample {
+  before: string;
+  after: string;
+  explanation: string;
+}
+
+export interface ActiveRuleItem {
+  id: string;
+  title: string;
+  category: string;
+  strategy: string;
+  php_pattern: string;
+  rhp_replacement?: string | null;
+  unsupported: boolean;
+  doc_url?: string | null;
+  llm_prompt_guidance?: string | null;
+  tags: string[];
+  examples: RuleExample[];
+}
+
+export interface ActiveRulesResponse {
+  file_path?: string | null;
+  detected_tags: string[];
+  rules: ActiveRuleItem[];
+  heuristics: string[];
+  rules_count: number;
+  heuristics_count: number;
+  system_prompt_preview?: string | null;
+}
+
+export interface SaveLearningFixRequest {
+  title: string;
+  context_symptom?: string;
+  root_cause?: string;
+  working_solution?: string;
+  verification?: string;
+  key_heuristic?: string;
+  content?: string;
+}
+
