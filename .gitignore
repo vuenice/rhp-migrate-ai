@@ -10,8 +10,9 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
+!lib/
+!lib/**
 parts/
 sdist/
 var/
@@ -36,3 +37,9 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .bin/
+
+# Node & Next.js
+node_modules/
+.next/
+out/
+
