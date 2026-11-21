@@ -308,3 +308,45 @@ def test_pending_proposals_and_approve(monkeypatch, tmp_path):
     # Pending file should now be empty and context.md updated
     assert pending_file.read_text(encoding="utf-8") == ""
     assert "Array to Dict" in test_context.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Workspace Endpoints in Server API
+# ---------------------------------------------------------------------------
+
+def test_server_workspace_lifecycle_api(monkeypatch, tmp_path):
+    """Test workspace upload, tree navigation, and file retrieval via main app client."""
+    from rhp_migrate.server.workspace import workspace_manager
+
+    workspaces_dir = tmp_path / "server_test_workspaces"
+    monkeypatch.setenv("RHP_WORKSPACES_DIR", str(workspaces_dir))
+    workspace_manager.base_dir = workspaces_dir
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("app/Http/Controllers/OrderController.php", "<?php class OrderController extends Controller {}")
+        zf.writestr("app/Models/Order.php", "<?php class Order extends Model {}")
+        zf.writestr("vendor/autoload.php", "<?php")
+        zf.writestr(".env", "APP_ENV=local")
+
+    # 1. Upload zip
+    files = {"file": ("repo.zip", buf.getvalue(), "application/zip")}
+    upload_res = client.post("/api/workspace/upload-zip", files=files)
+    assert upload_res.status_code == 200
+    ws_id = upload_res.json()["workspace_id"]
+
+    # 2. Get tree
+    tree_res = client.get(f"/api/workspace/{ws_id}/tree")
+    assert tree_res.status_code == 200
+    tree_data = tree_res.json()
+    assert tree_data["total_files"] == 2  # vendor and .env filtered out
+
+    # 3. Get file content
+    file_res = client.get(
+        f"/api/workspace/{ws_id}/file",
+        params={"path": "app/Http/Controllers/OrderController.php"},
+    )
+    assert file_res.status_code == 200
+    assert "OrderController extends Controller" in file_res.json()["content"]
+    assert file_res.json()["classification"] == "Controller"
+

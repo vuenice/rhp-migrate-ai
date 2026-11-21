@@ -268,3 +268,70 @@ class PendingProposalsResponse(BaseModel):
     count: int
     pending_file: str
     proposals: list[PendingProposalItem]
+
+
+# ---------------------------------------------------------------------------
+# Workspace Ingestion Models
+# ---------------------------------------------------------------------------
+
+class CloneGithubRequest(BaseModel):
+    """Payload for POST /api/workspace/clone-github."""
+    model_config = ConfigDict(extra="forbid")
+
+    repo_url: str = Field(..., description="GitHub repository URL (https or ssh)")
+    branch: Optional[str] = Field(None, description="Optional branch or tag to clone")
+    github_token: Optional[str] = Field(None, description="Optional GitHub personal access token for private repositories")
+
+
+class WorkspaceResponse(BaseModel):
+    """Response returned upon workspace creation (upload-zip or clone-github)."""
+    model_config = ConfigDict(extra="ignore")
+
+    workspace_id: str = Field(..., description="Unique workspace identifier")
+    workspace_path: str = Field(..., description="Sandboxed workspace directory path")
+    file_count: int = Field(0, description="Total number of files extracted or cloned")
+    message: str = Field("Workspace ready", description="Status message")
+
+
+class FileTreeNode(BaseModel):
+    """Hierarchical node in a workspace file tree."""
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(..., description="File or directory name")
+    path: str = Field(..., description="Relative path from workspace root")
+    type: Literal["file", "directory"] = Field("file", description="Node type: 'file' or 'directory'")
+    size: Optional[int] = Field(None, description="File size in bytes (None for directories)")
+    classification: Optional[str] = Field(None, description="PHP file classification: Controller, Model, Service, Migration, Blade view")
+    children: Optional[list[FileTreeNode]] = Field(None, description="Child nodes for directories")
+
+
+FileTreeNode.model_rebuild()
+
+
+class WorkspaceTreeResponse(BaseModel):
+    """Response returned by GET /api/workspace/{workspace_id}/tree."""
+    model_config = ConfigDict(extra="ignore")
+
+    workspace_id: str = Field(..., description="Unique workspace identifier")
+    total_files: int = Field(..., description="Total non-filtered files in workspace")
+    tree: list[FileTreeNode] = Field(default_factory=list, description="Root directory tree structure")
+
+
+class WorkspaceFileContentResponse(BaseModel):
+    """Response returned by GET /api/workspace/{workspace_id}/file."""
+    model_config = ConfigDict(extra="ignore")
+
+    workspace_id: str = Field(..., description="Unique workspace identifier")
+    path: str = Field(..., description="Relative path within the workspace")
+    content: str = Field(..., description="Raw text content of the file")
+    size: int = Field(..., description="Size of the file in bytes")
+    classification: Optional[str] = Field(None, description="PHP file classification")
+
+
+class WorkspaceCleanupResponse(BaseModel):
+    """Response returned by workspace cleanup actions."""
+    model_config = ConfigDict(extra="ignore")
+
+    cleaned_count: int = Field(..., description="Number of expired workspaces deleted")
+    message: str = Field(..., description="Status message")
+

@@ -2,12 +2,41 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from rhp_migrate.server.routes.analyze import router as analyze_router
 from rhp_migrate.server.routes.migrate import router as migrate_router
 from rhp_migrate.server.routes.rules import router as rules_router
+from rhp_migrate.server.workspace import (
+    periodic_workspace_cleanup_task,
+    router as workspace_router,
+)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan context for background tasks."""
+    stop_event = asyncio.Event()
+    cleanup_task = asyncio.create_task(
+        periodic_workspace_cleanup_task(
+            interval_seconds=1800,
+            max_age_seconds=7200,
+            stop_event=stop_event,
+        )
+    )
+    try:
+        yield
+    finally:
+        stop_event.set()
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 def create_app() -> FastAPI:
@@ -23,6 +52,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=lifespan,
     )
 
     # Configure CORS middleware for broad frontend compatibility
@@ -38,6 +68,8 @@ def create_app() -> FastAPI:
     app.include_router(analyze_router, prefix="/api", tags=["Analysis"])
     app.include_router(migrate_router, prefix="/api", tags=["Migration"])
     app.include_router(rules_router, prefix="/api", tags=["Rules & Memory"])
+    app.include_router(workspace_router, prefix="/api", tags=["Workspace"])
+
 
     @app.get("/", tags=["Health"])
     async def root():
