@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,10 +56,16 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Configure CORS middleware for broad frontend compatibility
+    # Configure CORS middleware (configurable via CORS_ORIGINS or RHP_CORS_ORIGINS)
+    cors_env = os.environ.get("CORS_ORIGINS") or os.environ.get("RHP_CORS_ORIGINS", "*")
+    if cors_env.strip() == "*":
+        allow_origins = ["*"]
+    else:
+        allow_origins = [orig.strip() for orig in cors_env.split(",") if orig.strip()]
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allow_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

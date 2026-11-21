@@ -85,7 +85,7 @@ class LiteLLMClient(BaseLLMClient):
         mock_responses: Optional[list[Any]] = None,
     ) -> None:
         self._raw_provider = (provider or "").strip().lower()
-        self.api_base = api_base
+        self.api_base = api_base or self._fallback_env_base(self._raw_provider)
         self._mock_responses = mock_responses or []
 
         resolved_model = resolve_litellm_model(self._raw_provider, model_name)
@@ -105,6 +105,13 @@ class LiteLLMClient(BaseLLMClient):
         elif provider == "deepseek":
             return os.environ.get("DEEPSEEK_API_KEY")
         return None
+
+    @classmethod
+    def _fallback_env_base(cls, provider: str) -> Optional[str]:
+        """Check environment variables for custom api_base if not passed in request."""
+        if provider == "ollama":
+            return os.environ.get("OLLAMA_API_BASE") or os.environ.get("LITELLM_API_BASE")
+        return os.environ.get("LITELLM_API_BASE") or os.environ.get("OPENAI_API_BASE")
 
     @property
     def provider_name(self) -> str:

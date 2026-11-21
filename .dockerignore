@@ -1,0 +1,33 @@
+# Git and VCS
+.git
+.github
+.gitignore
+
+# Node.js
+node_modules
+.next
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python & virtual environments
+.venv
+venv
+ENV/
+env/
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache
+.coverage
+htmlcov/
+.mypy_cache
+.ruff_cache
+
+# Environment configuration and local data
+.env
+.env*.local
+data/
+*.tmp
+.DS_Store
