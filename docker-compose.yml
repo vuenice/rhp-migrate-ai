@@ -1,0 +1,117 @@
+# ==============================================================================
+# Docker Compose for rhp-migrate-ai Self-Hosted / On-Premise Deployment
+#
+# Services:
+#   - web: Next.js frontend workbench (port 3000)
+#   - api: FastAPI backend with persistent volume for learnings.md & rules (port 8000)
+#   - ollama (optional): Local LLM inference profile for offline air-gapped VPCs
+#
+# Quickstart:
+#   1. Standard cloud/BYOK deployment:
+#      docker compose up -d
+#
+#   2. Offline air-gapped deployment with local Ollama LLM:
+#      docker compose --profile local-llm up -d
+# ==============================================================================
+
+services:
+  # ----------------------------------------------------------------------------
+  # Web Frontend Service (Next.js 20 Standalone)
+  # ----------------------------------------------------------------------------
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    image: rhp-migrate-ai-web:latest
+    container_name: rhp-migrate-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOSTNAME=0.0.0.0
+      - NEXT_TELEMETRY_DISABLED=1
+      - BACKEND_API_URL=http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - rhp-network
+
+  # ----------------------------------------------------------------------------
+  # API Backend Service (FastAPI, uv, tree-sitter, LiteLLM, RHP CLI)
+  # ----------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    image: rhp-migrate-ai-api:latest
+    container_name: rhp-migrate-api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      - PORT=8000
+      - RHP_WORKSPACE_ROOT=/data
+      - RHP_LEARNINGS_PATH=/data/learnings.md
+      - RHP_RULES_DIR=/data/rules
+      - RHP_WORKSPACES_DIR=/data/workspaces
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://ollama:11434}
+      - LITELLM_API_BASE=${LITELLM_API_BASE:-}
+      # Optional default provider API keys (clients can also provide keys per-request via BYOK)
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+    volumes:
+      # Persistent storage for learnings.md, custom rules, and sandboxed project workspaces
+      - rhp_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - rhp-network
+
+  # ----------------------------------------------------------------------------
+  # Ollama Local LLM Service (Optional profile for 100% offline air-gapped setup)
+  # Activated with: docker compose --profile local-llm up -d
+  # ----------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rhp-migrate-ollama
+    restart: unless-stopped
+    profiles:
+      - local-llm
+      - offline
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_ORIGINS=*
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - rhp-network
+
+networks:
+  rhp-network:
+    driver: bridge
+
+volumes:
+  rhp_data:
+    name: rhp_migrate_data
+  ollama_data:
+    name: rhp_migrate_ollama_data

@@ -82,9 +82,19 @@ When appending new learnings, follow this format:
   - Use duck-typing (`hasattr(item, "read")`) for multipart form items to avoid FastAPI vs Starlette `UploadFile` class mismatch.
   - Structure SSE streaming via `StreamingResponse(event_generator(), media_type="text/event-stream")` emitting sequenced stages: AST parsing -> initial draft -> compiler check -> critic reflection -> final code -> done.
 - **Verification**: Verified across 13 new unit tests in `tests/test_server_api.py` and 194 total passing tests.
-- **Key Heuristic**: When inspecting form-uploaded files in FastAPI, verify via duck typing (`hasattr(item, "read")`); route BYOK inference dynamically through LiteLLM with request-scoped credentials.
+### [2026-11-21] Production Docker Compose Multi-Stage Setup & Air-Gapped Deployment
+- **Context / Symptom**: Deploying `rhp-migrate-ai` on internal company servers or private VPCs requires a multi-service setup (Next.js frontend, FastAPI backend, persistent volumes for learnings/rules, compiler check prerequisites, and offline LLMs).
+- **Root Cause**: Next.js monolithic runtime image sizes exceed 1GB without standalone output; additionally, persistent volumes mount over container directories, which would wipe default `learnings.md` and `rules.yaml` if not seeded on container initialization.
+- **Working Solution**:
+  - Configure `output: 'standalone'` in `next.config.mjs` and copy `.next/standalone`, `.next/static`, and `public` into an unprivileged Node 20 runner stage.
+  - Implement a Python 3.12 stage using `uv` with compiler prerequisites (`build-essential`, `gcc`, `git`, `curl`), packaging the RHP CLI check tool at `/usr/local/bin/rhp`.
+  - Add `docker-entrypoint.sh` to automatically seed `/data/learnings.md` and `/data/rules/` if empty on first volume mount.
+  - Support configurable CORS origins via `CORS_ORIGINS`, persistent volume paths via `RHP_LEARNINGS_PATH` / `RHP_RULES_DIR`, and optional offline air-gapped migrations via Docker Compose `--profile local-llm` running Ollama.
+- **Verification**: Verified via `npm run build` (standalone output created) and `pytest` (all 220 tests passing).
+- **Key Heuristic**: In production container environments, use Next.js standalone output to reduce image footprint; seed persistent volumes via container entrypoint scripts so initial system memory is never blank.
 
 ---
+
 
 ## 🔄 Graduation Pipeline (From Working Memory to Core Rules)
 

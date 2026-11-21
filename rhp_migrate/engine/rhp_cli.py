@@ -345,6 +345,7 @@ def find_rhp_binary(custom_path: Optional[Union[str, Path]] = None) -> Optional[
 
     # 4. Check common locations
     candidate_paths = [
+        Path(__file__).resolve().parent.parent.parent / "bin" / "rhp",
         Path.home() / ".cargo" / "bin" / "rhp",
         Path("/usr/local/bin/rhp"),
         Path("/usr/bin/rhp"),

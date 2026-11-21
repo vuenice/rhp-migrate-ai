@@ -1,6 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  output: "standalone",
   // Allow proxying /api requests to FastAPI backend on port 8000 during development
   async rewrites() {
     return [

@@ -8,6 +8,7 @@ into LLM system prompts.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import re
 from typing import Any, Iterable, Optional, Sequence, TYPE_CHECKING, Union
@@ -108,6 +109,9 @@ class LearningEntry(BaseModel):
 
 def find_learnings_file() -> Path:
     """Locate learnings.md by searching parent directories starting from current file or cwd."""
+    env_path = os.environ.get("RHP_LEARNINGS_PATH")
+    if env_path and Path(env_path).is_file():
+        return Path(env_path).resolve()
     candidates = [
         Path.cwd() / "learnings.md",
         Path(__file__).resolve().parent.parent.parent / "learnings.md",

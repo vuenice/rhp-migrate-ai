@@ -197,5 +197,12 @@ class RuleRegistry:
 
     @classmethod
     def default(cls) -> "RuleRegistry":
-        """Load the bundled default rules.yaml."""
+        """Load the bundled default rules.yaml or environment configured rules path."""
+        import os
+        env_yaml = os.environ.get("RHP_RULES_YAML_PATH")
+        if env_yaml and Path(env_yaml).is_file():
+            return cls.from_yaml_file(env_yaml)
+        env_dir = os.environ.get("RHP_RULES_DIR")
+        if env_dir and (Path(env_dir) / "rules.yaml").is_file():
+            return cls.from_yaml_file(Path(env_dir) / "rules.yaml")
         return cls.from_yaml_file(_DEFAULT_RULES_PATH)
