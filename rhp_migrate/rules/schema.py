@@ -12,6 +12,7 @@ class RuleCategory(str, Enum):
     HTTP_FACADE = "HTTP_FACADE"
     UNSUPPORTED = "UNSUPPORTED"
     STANDARD_LIBRARY = "STANDARD_LIBRARY"
+    TEMPLATES = "TEMPLATES"
 
 
 class MigrationStrategy(str, Enum):

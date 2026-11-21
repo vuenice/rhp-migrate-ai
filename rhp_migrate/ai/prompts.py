@@ -36,7 +36,18 @@ SYSTEM_PROMPT = """You are an expert compiler engineer and static analysis speci
    - Process ONLY the exact target function, method, or class provided.
    - Do NOT emit whole files, opening PHP tags (<?php), closing tags (?>), or file-level wrappers unless the target unit is a standalone class definition.
 
-6. **Strict Structured JSON Output**:
+6. **Rade Template Extraction & Output Buffering (`ob_*`)**:
+   - Output buffering (ob_*) and standalone template includes are forbidden in RHP.
+   - When encountering `ob_*`, inline HTML, or template inclusion: extract the HTML markup into companion `.rade.rhp` files using Rade directives (`@if`, `@foreach`, `@for`, `@include`, `{{ $var }}`).
+   - Place companion files in `companion_files` list (e.g. `file_path: "resources/views/partials/card.rade.rhp"`).
+   - In the migrated unit code, replace the buffer/include with `View::render('partials.card', ['key' => $val])`.
+   - In HTTP controllers/actions, return `Response::html(...)` or `Response::json(...)` instead of raw `echo`.
+
+7. **Prefix-Typed Variable Declarations**:
+   - Typed local variables MUST use C/Java prefix syntax: `Type $var = expr;` (e.g. `string $html = ...;`, `list<Product> $items = ...;`, `dict<string, mixed> $data = ...;`).
+   - NEVER emit postfix colon typing (`$var: Type = ...`), which is rejected by the RHP parser with a syntax error.
+
+8. **Strict Structured JSON Output**:
    - You MUST output ONLY a valid JSON object matching the LLMMigrationResult schema.
    - Do NOT include markdown code blocks (e.g. ```json ... ```), conversational commentary, introductory greetings, or postscript explanations.
    - If a construct cannot be resolved safely, mark `patch_type` as "UNRESOLVED", set `needs_human_review` to true, and provide a clear `review_reason`.
@@ -337,6 +348,7 @@ def build_user_prompt(
         '- `unit_identifier`: string (must match "' + unit_identifier + '")',
         '- `patch_type`: "FULL_REPLACEMENT" | "UNIFIED_DIFF" | "UNRESOLVED"',
         "- `transformed_code`: string (the RHP replacement code or unified diff)",
+        "- `companion_files`: list of objects with {file_path, content, description} for any companion .rade.rhp template files extracted",
         "- `resolved_types`: list of objects with {param_name, inferred_type, confidence, rationale}",
         "- `applied_rules`: list of applied rule IDs (e.g. ['RHP-UNSUP-001'])",
         "- `needs_human_review`: boolean (true if ambiguous or manual rewrite required)",

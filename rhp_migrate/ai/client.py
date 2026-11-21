@@ -524,8 +524,16 @@ class LLMRunner:
             return OpenAIClient(model_name=model_name, api_key=api_key, temperature=temperature)
         elif resolved == "mock":
             return MockLLMClient(model_name=model_name)
+        elif resolved in ("litellm", "ollama", "deepseek"):
+            from rhp_migrate.server.byok import LiteLLMClient
+            return LiteLLMClient(
+                model_name=model_name,
+                provider=resolved,
+                api_key=api_key,
+                temperature=temperature,
+            )
         else:
-            raise ValueError(f"Unknown LLM provider: '{provider_name}'. Supported: gemini, anthropic, openai, mock.")
+            raise ValueError(f"Unknown LLM provider: '{provider_name}'. Supported: gemini, anthropic, openai, litellm, ollama, deepseek, mock.")
 
     def reset_stats(self) -> None:
         """Reset cumulative token and cost counters."""

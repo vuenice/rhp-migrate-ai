@@ -74,7 +74,12 @@ class MigrateFileResult(BaseModel):
     named_arg_count: int = Field(0, description="Number of named arguments converted to positional")
     param_order_count: int = Field(0, description="Number of parameter order declarations fixed")
     void_return_count: int = Field(0, description="Number of void return types stripped")
+    legacy_include_count: int = Field(0, description="Number of standalone include/require statements removed")
+    ob_rewritten_count: int = Field(0, description="Number of output buffering blocks rewritten")
+    echo_response_count: int = Field(0, description="Number of controller echo calls converted to Response returns")
+    rade_directive_count: int = Field(0, description="Number of PHP template tags converted to Rade directives")
     warnings: list[str] = Field(default_factory=list, description="File-level warnings")
+
 
 
 class MigrateReport(BaseModel):

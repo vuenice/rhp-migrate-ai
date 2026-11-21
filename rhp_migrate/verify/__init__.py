@@ -20,6 +20,11 @@ from rhp_migrate.verify.differential import (
     run_differential_snippet,
     run_differential_test,
 )
+from rhp_migrate.verify.deterministic_audit import (
+    DeterministicMistakeRecord,
+    DeterministicSyntaxError,
+    DeterministicValidator,
+)
 
 __all__ = [
     "CodeUnit",
@@ -38,4 +43,8 @@ __all__ = [
     "run_differential",
     "run_differential_snippet",
     "run_differential_test",
+    "DeterministicMistakeRecord",
+    "DeterministicSyntaxError",
+    "DeterministicValidator",
 ]
+

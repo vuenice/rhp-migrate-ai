@@ -47,6 +47,11 @@ from rhp_migrate.verify.compiler_loop import (
     replace_unit_in_source,
     verify_and_heal,
 )
+from rhp_migrate.verify.deterministic_audit import (
+    DeterministicMistakeRecord,
+    DeterministicValidator,
+)
+
 
 
 class DefaultCommandGroup(TyperGroup):
@@ -335,6 +340,10 @@ def main(
                             + file_res.error_suppress_count
                             + file_res.var_dump_count
                             + file_res.strict_eq_count
+                            + file_res.legacy_include_count
+                            + file_res.ob_rewritten_count
+                            + file_res.echo_response_count
+                            + file_res.rade_directive_count
                             + (1 if file_res.php_tag_removed else 0)
                         )
                         if not dry_run and file_path.exists():
@@ -361,6 +370,40 @@ def main(
 
             deterministic_edits += file_deterministic_edits
 
+            # Step C.5: Deterministic Syntax Validation & Mistake Audit
+            # Assume deterministic passes are not perfect and make mistakes.
+            # Check if output syntax is valid; if invalid, extract defects, before/after syntax,
+            # what could have been done better, record a report on this app, and suggest context updates.
+            validator = DeterministicValidator()
+            audit_record = validator.validate(
+                before_code=content,
+                after_code=current_content,
+                file_path=file_path,
+                bin_path=rhp_bin,
+            )
+            deterministic_compiler_errors: list[str] = []
+            if not audit_record.is_valid:
+                report_file = validator.record_report(audit_record, base_dir=base_dir)
+                for err in audit_record.errors:
+                    loc = f"line {err.line}:{err.column}"
+                    code_prefix = f"[{err.error_code}] " if err.error_code else ""
+                    deterministic_compiler_errors.append(f"{code_prefix}{loc}: {err.message}")
+
+                try:
+                    rel_report = report_file.relative_to(base_dir)
+                except ValueError:
+                    rel_report = report_file
+
+                console.print(
+                    Panel.fit(
+                        f"[bold red]Deterministic Migration Syntax Defect Detected:[/bold red] {file_path.name}\n"
+                        f"[yellow]What is invalid:[/yellow] {audit_record.what_is_invalid}\n"
+                        f"[dim]Recorded audit report: {rel_report}[/dim]",
+                        title="Deterministic Audit Warning",
+                        border_style="red",
+                    )
+                )
+
             # Step D: LLM Stage for Leftovers
             if ai and llm_runner:
                 analyzer = ReadinessAnalyzer()
@@ -374,11 +417,29 @@ def main(
                         seen_units.add(unit.identifier)
                         units_to_migrate.append(unit)
 
+                # If deterministic errors exist but no unit was flagged, add whole-file / failing unit
+                if not units_to_migrate and not audit_record.is_valid and audit_record.errors:
+                    err_line = audit_record.errors[0].line
+                    unit = find_code_unit(current_content, err_line, file_path=file_path)
+                    if unit.identifier not in seen_units:
+                        seen_units.add(unit.identifier)
+                        units_to_migrate.append(unit)
+
                 for unit in units_to_migrate:
                     try:
+                        # Feed deterministic compiler errors if unit overlaps failing line
+                        unit_compiler_errors: list[str] = []
+                        if deterministic_compiler_errors:
+                            for d_err in audit_record.errors:
+                                if unit.start_line <= d_err.line <= unit.end_line:
+                                    unit_compiler_errors.append(f"line {d_err.line}: {d_err.message}")
+                        if not unit_compiler_errors and deterministic_compiler_errors:
+                            unit_compiler_errors = deterministic_compiler_errors
+
                         ai_resp = llm_runner.migrate_unit(
                             unit_identifier=unit.identifier,
                             code=unit.code,
+                            compiler_errors=unit_compiler_errors if unit_compiler_errors else None,
                         )
                         transformed = clean_code_fence(ai_resp.result.transformed_code)
                         if transformed and transformed != unit.code:
@@ -388,6 +449,22 @@ def main(
                             if not dry_run:
                                 file_path.write_text(current_content, encoding="utf-8")
                             llm_functions += 1
+
+                        # Handle companion files (e.g. extracted .rade.rhp templates)
+                        if ai_resp.result.companion_files:
+                            for comp in ai_resp.result.companion_files:
+                                comp_path = (base_dir / comp.file_path).resolve()
+                                if not dry_run:
+                                    comp_path.parent.mkdir(parents=True, exist_ok=True)
+                                    comp_path.write_text(comp.content, encoding="utf-8")
+                                console.print(
+                                    f"[bold green]Created companion template:[/bold green] [cyan]{comp.file_path}[/cyan]"
+                                )
+                                if git_mgr is not None and not dry_run and git_mgr.is_git_repo():
+                                    try:
+                                        git_mgr._run_git(["add", str(comp_path)])
+                                    except Exception:
+                                        pass
 
                         if ai_resp.result.needs_human_review:
                             reason = ai_resp.result.review_reason or "Review required"
@@ -451,10 +528,15 @@ def main(
                         check_report=check_rep,
                         healing_log=healing_log,
                     )
+                    # Merge deterministic audit mistakes into critic report
+                    if not audit_record.is_valid:
+                        critic_report.migrate_mistakes.extend(audit_record.to_critic_mistakes())
+
                     dispatcher = FeedbackDispatcher(base_dir=base_dir, central_url=central_url)
                     dispatcher.dispatch(critic_report)
                 except Exception:
                     pass
+
 
             # Step G: Atomic Git Commit
             if git_mgr is not None and not dry_run and verified:
@@ -626,6 +708,106 @@ def approve_context(
     )
 
 
+@app.command(name="audit-deterministic")
+def audit_deterministic(
+    path: Path = typer.Argument(
+        ...,
+        help="Path to PHP file or directory to audit deterministic output syntax.",
+    ),
+    php_version: Optional[str] = typer.Option(
+        None,
+        "--php-version",
+        help="Override source PHP version (e.g. '8' or '7').",
+    ),
+    record_report: bool = typer.Option(
+        True,
+        "--record/--no-record",
+        help="Save audit report and context update suggestions into .rhp/reports/.",
+    ),
+) -> None:
+    """Audit deterministic migration output on a file, verify syntax validity, and record mistakes."""
+    target_path = path.resolve()
+    if not target_path.exists():
+        console.print(f"[bold red]Error:[/bold red] Target path does not exist: {target_path}")
+        raise typer.Exit(code=1)
+
+    targets = [target_path] if target_path.is_file() else [f for f in target_path.rglob("*.php") if f.is_file()]
+    if not targets:
+        console.print(f"[yellow]No PHP files found in {target_path}.[/yellow]")
+        return
+
+    rhp_bin = find_rhp_binary()
+    detected_php = detect_php_version(target_path)
+    eff_major = int(php_version[0]) if php_version and php_version[0].isdigit() else detected_php.major
+    validator = DeterministicValidator()
+    base_dir = target_path if target_path.is_dir() else target_path.parent
+
+    total_files = len(targets)
+    invalid_files = 0
+    total_errors = 0
+
+    for file_p in targets:
+        original = file_p.read_text(encoding="utf-8")
+        current = original
+
+        # Apply deterministic passes
+        if rhp_bin:
+            try:
+                rep = run_migrate(file_p, dry_run=True, php_version=eff_major, bin_path=rhp_bin)
+            except Exception:
+                pass
+        fb = apply_fallback_rules(current)
+        if fb.modified:
+            current = fb.transformed_code
+
+        record = validator.validate(
+            before_code=original,
+            after_code=current,
+            file_path=file_p,
+            bin_path=rhp_bin,
+        )
+
+        if not record.is_valid:
+            invalid_files += 1
+            total_errors += len(record.errors)
+            saved_json = validator.record_report(record, base_dir=base_dir) if record_report else None
+            console.print(
+                Panel.fit(
+                    f"[bold red]Invalid Deterministic Syntax:[/bold red] {file_p.name}\n"
+                    f"[yellow]What is invalid:[/yellow] {record.what_is_invalid}\n"
+                    f"[dim]Errors: {len(record.errors)} | Report: {saved_json}[/dim]",
+                    title="Deterministic Audit Failure",
+                    border_style="red",
+                )
+            )
+            # Print Markdown report summary
+            console.print(record.format_markdown_report())
+        else:
+            console.print(f"[green]✔ Valid Syntax:[/green] {file_p.name}")
+
+    status_style = "bold green" if invalid_files == 0 else "bold red"
+    console.print(
+        f"\n[bold cyan]Audit Complete:[/bold cyan] {total_files} files scanned, "
+        f"[{status_style}]{invalid_files} files invalid[/{status_style}], "
+        f"{total_errors} total syntax errors detected."
+    )
+
+
+
+@app.command(name="server")
+def start_server_command(
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="Bind host address"),
+    port: int = typer.Option(8000, "--port", "-p", help="Bind port number"),
+    reload: bool = typer.Option(False, "--reload", "-r", help="Enable server auto-reload"),
+) -> None:
+    """Launch the rhp-migrate-ai FastAPI backend server."""
+    from rhp_migrate.server.main import run
+
+    console.print(f"[bold green]Starting rhp-migrate-ai API server on[/bold green] [cyan]http://{host}:{port}[/cyan]...")
+    run(host=host, port=port, reload=reload)
+
+
 if __name__ == "__main__":
     app()
+
 

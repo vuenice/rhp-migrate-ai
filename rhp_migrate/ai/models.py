@@ -36,6 +36,24 @@ class TypeResolution(BaseModel):
     )
 
 
+class CompanionFile(BaseModel):
+    """Represents an additional file created during migration (e.g. companion .rade.rhp template)."""
+    model_config = ConfigDict(extra="forbid")
+
+    file_path: str = Field(
+        ...,
+        description="Relative destination file path (e.g. 'resources/views/partials/card.rade.rhp')",
+    )
+    content: str = Field(
+        ...,
+        description="Full content of the companion file (e.g. Rade template directives and HTML)",
+    )
+    description: str = Field(
+        default="",
+        description="Brief description of the companion file's purpose",
+    )
+
+
 class LLMMigrationResult(BaseModel):
     """Structured response output produced by the LLM for a single unit migration."""
     model_config = ConfigDict(extra="forbid")
@@ -51,6 +69,10 @@ class LLMMigrationResult(BaseModel):
     transformed_code: str = Field(
         ...,
         description="The transformed RHP code, unified diff patch, or original code if UNRESOLVED",
+    )
+    companion_files: list[CompanionFile] = Field(
+        default_factory=list,
+        description="Companion template or view files created alongside the migrated RHP code (e.g. .rade.rhp files)",
     )
     resolved_types: list[TypeResolution] = Field(
         default_factory=list,
@@ -68,6 +90,7 @@ class LLMMigrationResult(BaseModel):
         default=None,
         description="Detailed explanation of what requires manual review when needs_human_review is True",
     )
+
 
 
 class TokenUsage(BaseModel):
