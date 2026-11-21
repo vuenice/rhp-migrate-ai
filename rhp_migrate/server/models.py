@@ -248,10 +248,54 @@ class RuleFileUpdateRequest(BaseModel):
 
 class RuleFileAppendRequest(BaseModel):
     """Request to append an entry or section to a rules/learnings file."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
-    content: str = Field(..., description="Content or markdown block to append")
+    content: Optional[str] = Field(None, description="Content or markdown block to append")
     title: Optional[str] = Field(None, description="Optional title or header for the appended block")
+    context_symptom: Optional[str] = Field(None, description="Context / Symptom for structured learning fix")
+    root_cause: Optional[str] = Field(None, description="Root cause analysis")
+    working_solution: Optional[str] = Field(None, description="Verified working solution or code pattern")
+    verification: Optional[str] = Field(None, description="Verification command or test result")
+    key_heuristic: Optional[str] = Field(None, description="Actionable 1-2 sentence heuristic for future operations")
+
+
+class ActiveRulesRequest(BaseModel):
+    """Request payload for fetching AST-matched rules for a file."""
+    model_config = ConfigDict(extra="ignore")
+
+    file_path: Optional[str] = Field(None, description="Relative or absolute file path")
+    code: Optional[str] = Field(None, description="PHP code snippet to analyze directly")
+    workspace_id: Optional[str] = Field(None, description="Optional workspace ID to locate the file")
+
+
+class ActiveRuleItem(BaseModel):
+    """Summarized rule matching the target file AST."""
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    title: str
+    category: str
+    strategy: str
+    php_pattern: str
+    rhp_replacement: Optional[str] = None
+    unsupported: bool = False
+    doc_url: Optional[str] = None
+    llm_prompt_guidance: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    examples: list[dict[str, str]] = Field(default_factory=list)
+
+
+class ActiveRulesResponse(BaseModel):
+    """Response containing AST tags, matched rules, and active heuristics."""
+    model_config = ConfigDict(extra="ignore")
+
+    file_path: Optional[str] = None
+    detected_tags: list[str] = Field(default_factory=list)
+    rules: list[ActiveRuleItem] = Field(default_factory=list)
+    heuristics: list[str] = Field(default_factory=list)
+    rules_count: int = 0
+    heuristics_count: int = 0
+    system_prompt_preview: Optional[str] = None
 
 
 class RuleActionResponse(BaseModel):

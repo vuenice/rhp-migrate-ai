@@ -17,6 +17,7 @@ from rhp_migrate.ai.critic import MigrationCritic
 from rhp_migrate.analyzer.parser import PHPParser
 from rhp_migrate.analyzer.readiness import ReadinessAnalyzer
 from rhp_migrate.engine.fallback_rules import apply_fallback_rules
+from rhp_migrate.rules.selector import RuleSelector
 from rhp_migrate.engine.rhp_cli import (
     RhpNotFoundError,
     find_rhp_binary,
@@ -104,6 +105,10 @@ async def migrate_file_endpoint(
             deterministic_compiler_errors.append(f"line {err.line}:{err.column}: {err.message}")
 
     # 4. LLM Migration of untyped/unsupported units
+    selector = RuleSelector()
+    file_rules = selector.select_rules(current_content)
+    applied_rules.extend([r.id for r in file_rules])
+
     analyzer = ReadinessAnalyzer()
     file_rep = analyzer.analyze_file(file_path, source=current_content)
     units_to_migrate: list[CodeUnit] = []
@@ -129,9 +134,11 @@ async def migrate_file_endpoint(
     healing_log: list[str] = []
     for unit in units_to_migrate:
         try:
+            unit_rules = selector.select_rules(unit.code) or file_rules
             ai_resp = llm_runner.migrate_unit(
                 unit_identifier=unit.identifier,
                 code=unit.code,
+                rules=unit_rules,
                 compiler_errors=deterministic_compiler_errors if deterministic_compiler_errors else None,
             )
             transformed = clean_code_fence(ai_resp.result.transformed_code)
@@ -318,11 +325,17 @@ async def migrate_stream_endpoint(
                 unit = find_code_unit(current_content, 1, file_path=file_path)
                 units_to_migrate.append(unit)
 
+            selector = RuleSelector()
+            file_rules = selector.select_rules(current_content)
+            applied_rules.extend([r.id for r in file_rules])
+
             for unit in units_to_migrate:
                 try:
+                    unit_rules = selector.select_rules(unit.code) or file_rules
                     ai_resp = llm_runner.migrate_unit(
                         unit_identifier=unit.identifier,
                         code=unit.code,
+                        rules=unit_rules,
                         extra_instructions=req.user_instruction,
                     )
                     transformed = clean_code_fence(ai_resp.result.transformed_code)

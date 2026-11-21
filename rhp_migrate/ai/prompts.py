@@ -54,9 +54,19 @@ SYSTEM_PROMPT = """You are an expert compiler engineer and static analysis speci
 """
 
 
-def build_system_prompt() -> str:
-    """Return the authoritative RHP migration system prompt."""
-    return SYSTEM_PROMPT.strip()
+def build_system_prompt(
+    heuristics: Optional[Sequence[str]] = None,
+    rules: Optional[Sequence[Rule]] = None,
+    include_learnings: bool = True,
+) -> str:
+    """Return the authoritative RHP migration system prompt with injected learnings and rules."""
+    from rhp_migrate.rules.selector import build_system_prompt_with_learnings
+    return build_system_prompt_with_learnings(
+        rules=rules,
+        heuristics=heuristics,
+        base_prompt=SYSTEM_PROMPT,
+        include_memory=include_learnings,
+    )
 
 
 def validate_single_unit(code: str, unit_identifier: str) -> None:
@@ -385,9 +395,10 @@ class MigrationPromptContext(BaseModel):
         default=None, description="Additional custom instructions"
     )
 
-    def render_system_prompt(self) -> str:
-        """Render the system prompt."""
-        return build_system_prompt()
+    def render_system_prompt(self, include_learnings: bool = True) -> str:
+        """Render the system prompt with rules and working memory."""
+        rule_objs = [r for r in self.rules if isinstance(r, Rule)]
+        return build_system_prompt(rules=rule_objs if rule_objs else None, include_learnings=include_learnings)
 
     def render_user_prompt(self, enforce_single_unit: bool = True) -> str:
         """Render the user prompt using this context."""
