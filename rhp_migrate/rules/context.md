@@ -34,7 +34,37 @@ This document serves as the living knowledge base for migrating PHP/Laravel code
 | `curl_init` / `curl_exec` | `Http::get()` / `Http::post()` | High-performance async HTTP |
 | `@error_suppress()` | Stripped | Proper exception handling mandatory |
 | `var_dump()` | `dd()` | RHP debug utility |
+| `$var: Type = ...` | `Type $var = ...` | Prefix typing is mandatory in RHP |
+| `ob_start() ... ob_get_clean()` | `View::render()` / string concat | Global buffering eliminated |
+| `include 'view.php';` | `View::render('view')` / `@include()` | Standalone includes forbidden at parse time |
+| `echo Response::html(...)` | `return Response::html(...)` | Controller `echo` does not write to HTTP buffer |
 
 ---
 
-## 3. Approved Learned Rules & Patterns (Auto-Merged from Agent Feedback)
+## 3. Rade Templates & View Conventions
+
+1. **Companion Template Files (`.rade.rhp`)**:
+   - Views reside under `resources/views/` (or configured RHP view directory).
+   - Use extension `.rade.rhp` (e.g. `resources/views/partials/card.rade.rhp`).
+   - Callers invoke views via `View::render('path.name', ['key' => $val])`.
+
+2. **Rade Directives**:
+   - Conditions: `@if ($cond) ... @elseif ($other) ... @else ... @endif`
+   - Loops: `@foreach ($items as $item) ... @endforeach`, `@for ($i = 0; $i < $n; $i++) ... @endfor`
+   - Sub-templates: `@include('partials.item_card')`
+   - Escaped output: `{{ $var }}` (auto-escapes with `Html::specialChars`)
+   - Raw output: `{!! $rawHtml !!}`
+
+3. **Prefix-Typed Variable Declarations**:
+   - Always declare typed variables using prefix syntax:
+     ```php
+     string $html = View::render('home.index');
+     Product[] $products = Product::all();
+     dict<string, mixed> $meta = ['count' => 10];
+     ```
+   - **Never** emit colon typing (`$html: string = ...;`), which triggers `Colon type syntax '$var: Type' is not supported`.
+
+---
+
+## 4. Approved Learned Rules & Patterns (Auto-Merged from Agent Feedback)
+

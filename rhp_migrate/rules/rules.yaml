@@ -163,6 +163,48 @@ rules:
           $username = Request::body('username');
         explanation: "Migrate PHP raw superglobals to the Request facade."
 
+  - id: RHP-SYN-007
+    title: Use prefix type syntax for variable declarations
+    category: TYPE_SYSTEM
+    strategy: DETERMINISTIC
+    php_pattern: "$var: Type = value; or Type $var = value;"
+    rhp_replacement: "Type $var = value;"
+    unsupported: false
+    doc_url: "https://rhp.dev/docs/syntax/variables"
+    llm_prompt_guidance: "RHP uses C/Java-style prefix type syntax ('Type $var = expr;'), NOT postfix colon type syntax ('$var: Type'). Always write 'string $html = ...;', 'Product[] $products = ...;', 'dict<string, mixed> $data = ...;'. Never emit '$var: Type'."
+    examples:
+      - before: |
+          $name: string = "Alice";
+          $items: list<string> = ["a", "b"];
+        after: |
+          string $name = "Alice";
+          list<string> $items = ["a", "b"];
+        explanation: "Colon type syntax '$var: Type' is not supported in RHP; use prefix type syntax 'Type $var'."
+
+  - id: RHP-TEM-001
+    title: Extract HTML snippets and echo buffers to Rade templates
+    category: TEMPLATES
+    strategy: LLM_ASSIST
+    php_pattern: "echo '<div>...</div>'; or inline HTML or ob_start() buffer with HTML markup"
+    rhp_replacement: "View::render('template.name', $data) or Response::html(View::render(...))"
+    unsupported: false
+    doc_url: "https://rhp.dev/docs/views/rade"
+    llm_prompt_guidance: "Extract HTML markup, template loops, and echo buffers into companion .rade.rhp files under resources/views/. Use Rade directives (@if, @foreach, @for, @include, {{ $var }}). In the RHP source, invoke View::render('view.name', [...]) and return Response::html(...) in controllers."
+    examples:
+      - before: |
+          ob_start();
+          foreach ($items as $item) {
+              echo "<li>" . htmlspecialchars($item['name']) . "</li>";
+          }
+          $html = ob_get_clean();
+        after: |
+          // Extracted to companion template resources/views/partials/items.rade.rhp:
+          // @foreach ($items as $item)
+          //     <li>{{ $item['name'] }}</li>
+          // @endforeach
+          string $html = View::render('partials.items', ['items' => $items]);
+        explanation: "HTML buffer loops extracted to declarative .rade.rhp templates with View::render()."
+
   - id: RHP-UNSUP-001
     title: Reflection API unsupported
     category: UNSUPPORTED
@@ -183,40 +225,40 @@ rules:
         explanation: "Reflection API is rejected at compilation; replace with static analysis or interface constraints."
 
   - id: RHP-UNSUP-002
-    title: Output buffering unsupported
+    title: Output buffering unsupported (migrate to Rade or View::render)
     category: UNSUPPORTED
     strategy: MANUAL_REWRITE
     php_pattern: "ob_start(), ob_get_clean(), ob_get_contents(), ob_end_flush()"
-    rhp_replacement: null
+    rhp_replacement: "View::render('path.name', $data) or Response::html(...)"
     unsupported: true
     doc_url: "https://rhp.dev/docs/unsupported/output-buffering"
-    llm_prompt_guidance: "Output buffering (ob_*) is not supported in RHP. Refactor output capturing to return string values directly, invoke templating engines (e.g. View::render), or utilize streaming response objects."
+    llm_prompt_guidance: "Output buffering (ob_*) is not supported in RHP. Refactor output capturing to return string values directly, invoke View::render() with companion .rade.rhp templates, or return Response::html(...) / Response::json(...). Discard empty buffers or silent execution wrappers."
     examples:
       - before: |
           ob_start();
           include 'views/header.php';
           $header = ob_get_clean();
         after: |
-          // TODO: [RHP-UNSUP-002] Output buffering is unsupported in RHP.
-          $header = View::render('views/header');
-        explanation: "Replace global output buffering with template rendering or explicit string returns."
+          string $header = View::render('views.header');
+        explanation: "Replace global output buffering with template rendering using View::render()."
 
   - id: RHP-UNSUP-003
-    title: Dynamic file inclusion unsupported
+    title: Dynamic and standalone file inclusion unsupported
     category: UNSUPPORTED
     strategy: MANUAL_REWRITE
-    php_pattern: "include $file, require $file, include_once $path, require_once $path"
-    rhp_replacement: null
+
+    php_pattern: "include $file, require $file, include 'file.php', require 'header.php'"
+    rhp_replacement: "View::render('view.name') or @include('view.name') or static imports"
     unsupported: true
     doc_url: "https://rhp.dev/docs/unsupported/dynamic-includes"
-    llm_prompt_guidance: "Dynamic runtime file inclusions (include $file, require $file) are prohibited in RHP. All modules must be statically resolved at compile time using standard imports and class autoloaders."
+    llm_prompt_guidance: "Standalone file inclusions (include/require) are forbidden at parse time in RHP. Class loading is project-wide automatic. For template/view files, extract to .rade.rhp templates and call View::render('view.name') or use Rade @include('view.name'). For dynamic file dispatch, use a static registry lookup."
     examples:
       - before: |
           $plugin = $_GET['plugin'];
           require "plugins/{$plugin}.php";
         after: |
-          // TODO: [RHP-UNSUP-003] Dynamic file inclusion is unsupported in RHP.
-          $plugin = Request::query('plugin');
-          $handler = PluginRegistry::get($plugin);
+          string $plugin = Request::query('plugin');
+          PluginHandler $handler = PluginRegistry::get($plugin);
           $handler->execute();
         explanation: "Dynamic require/include must be refactored into static imports, class autoloading, or registry lookups."
+

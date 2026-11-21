@@ -155,9 +155,9 @@ class FeedbackDispatcher:
 
         text = self.pending_context_path.read_text(encoding="utf-8")
         pattern = re.compile(
-            r"<!-- PENDING-CONTEXT-START id=(\S+) file=(\S+) php=(\S+) -->"
+            r"<!-- (?:PENDING-CONTEXT|DETERMINISTIC-AUDIT)-START id=(\S+) file=(\S+)(?: php=(\S+))? -->"
             r"(.*?)"
-            r"<!-- PENDING-CONTEXT-END id=\1 -->",
+            r"<!-- (?:PENDING-CONTEXT|DETERMINISTIC-AUDIT)-END id=\1 -->",
             re.DOTALL,
         )
         proposals: list[dict[str, str]] = []
@@ -165,10 +165,11 @@ class FeedbackDispatcher:
             proposals.append({
                 "id": m.group(1),
                 "file": m.group(2),
-                "php": m.group(3),
+                "php": m.group(3) or "auto",
                 "content": m.group(4).strip(),
             })
         return proposals
+
 
     def approve_all_pending(self, target_context_path: Union[str, Path]) -> int:
         """Approve all pending context blocks and append them to target context.md."""
