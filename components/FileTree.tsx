@@ -11,6 +11,7 @@ import {
   RefreshCw,
   SlidersHorizontal,
   FolderTree,
+  FolderPlus,
 } from "lucide-react";
 import { FileItem, FileStatus } from "@/types/workbench";
 
@@ -20,6 +21,7 @@ interface FileTreeProps {
   onSelectFile: (file: FileItem) => void;
   isLoading?: boolean;
   onRefresh?: () => void;
+  onNewProject?: () => void;
 }
 
 // Status Badges with clear icons and styling:
@@ -173,6 +175,7 @@ export function FileTree({
   onSelectFile,
   isLoading,
   onRefresh,
+  onNewProject,
 }: FileTreeProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => {
@@ -288,6 +291,15 @@ export function FileTree({
         </div>
 
         <div className="flex items-center gap-1">
+          {onNewProject && (
+            <button
+              onClick={onNewProject}
+              title="Start New Project"
+              className="p-1 rounded text-emerald-400 hover:text-emerald-200 hover:bg-neutral-800 transition-colors"
+            >
+              <FolderPlus className="h-3.5 w-3.5" />
+            </button>
+          )}
           {onRefresh && (
             <button
               onClick={onRefresh}
@@ -353,8 +365,19 @@ export function FileTree({
       {/* File List Tree */}
       <div className="flex-1 overflow-y-auto p-1.5 space-y-0.5">
         {filteredFiles.length === 0 ? (
-          <div className="p-4 text-center text-xs text-neutral-500">
-            {searchTerm ? "No matching files found" : "Workspace is empty"}
+          <div className="flex flex-col items-center justify-center p-6 text-center text-xs text-neutral-400 space-y-3">
+            <FolderTree className="h-8 w-8 text-neutral-600" />
+            <span>{searchTerm ? "No matching files found" : "Workspace is empty"}</span>
+            {!searchTerm && onNewProject && (
+              <button
+                type="button"
+                onClick={onNewProject}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-[11px] transition-colors shadow-sm"
+              >
+                <FolderPlus className="h-3.5 w-3.5" />
+                <span>Start New Project</span>
+              </button>
+            )}
           </div>
         ) : (
           filteredFiles.map((file) => (

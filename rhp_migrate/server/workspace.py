@@ -192,11 +192,14 @@ def validate_and_extract_zip(
     else:
         raise ValueError(f"Unsupported zip source type: {type(zip_source)}")
 
+    logger.info("Inspecting zip archive for extraction into %s", dest_dir)
     with zip_obj as zf:
         infolist = zf.infolist()
         if not infolist:
+            logger.warning("Zip archive has no entries (empty archive)")
             return []
 
+        logger.info("Validating %d archive members for Zip-Slip / path traversal", len(infolist))
         # 1. Validation pass: strictly check all members before extracting anything
         for member in infolist:
             filename = member.filename
@@ -205,11 +208,13 @@ def validate_and_extract_zip(
 
             # Reject absolute paths (POSIX / or Windows C:\)
             if filename.startswith(("/", "\\")) or (len(filename) > 1 and filename[1] == ":"):
+                logger.warning("Rejected zip member with absolute path: %s", filename)
                 raise ZipSlipError(f"Absolute path in zip member forbidden: {filename}")
 
             # Reject explicit parent directory traversal segments
             parts = Path(filename).parts
             if ".." in parts:
+                logger.warning("Rejected zip member with path traversal '..': %s", filename)
                 raise ZipSlipError(f"Path traversal '..' detected in zip member: {filename}")
 
             # Verify resolved target is within destination
@@ -217,6 +222,7 @@ def validate_and_extract_zip(
             try:
                 target_path.relative_to(dest_dir)
             except ValueError:
+                logger.warning("Zip-Slip detected for member '%s' escaping %s", filename, dest_dir)
                 raise ZipSlipError(f"Zip-slip detected: member '{filename}' escapes target workspace")
 
             # Check for symlink escaping target
@@ -224,14 +230,17 @@ def validate_and_extract_zip(
             if (mode & 0o170000) == 0o120000:
                 link_content = zf.read(member).decode("utf-8", errors="replace").strip()
                 if link_content.startswith(("/", "\\")) or (len(link_content) > 1 and link_content[1] == ":"):
+                    logger.warning("Forbidden absolute symlink target '%s' in member '%s'", link_content, filename)
                     raise ZipSlipError(f"Absolute symlink target in zip forbidden: {link_content}")
                 resolved_link = (target_path.parent / link_content).resolve()
                 try:
                     resolved_link.relative_to(dest_dir)
                 except ValueError:
+                    logger.warning("Symlink '%s' -> '%s' escapes target workspace %s", filename, link_content, dest_dir)
                     raise ZipSlipError(f"Symlink '{filename}' -> '{link_content}' escapes target workspace")
 
         # 2. Safe extraction pass
+        logger.info("All %d members validated safely; unpacking archive into %s", len(infolist), dest_dir)
         zf.extractall(dest_dir)
 
     extracted_files: list[str] = []
@@ -244,6 +253,7 @@ def validate_and_extract_zip(
             except ValueError:
                 pass
 
+    logger.info("Successfully unpacked %d files into %s", len(extracted_files), dest_dir)
     return extracted_files
 
 
@@ -265,7 +275,10 @@ def shallow_clone_repo(
 
     clean_url = repo_url.strip()
     if clean_url.startswith("-"):
+        logger.warning("Rejected repository URL starting with dash: %s", clean_url)
         raise GitCloneError("Invalid repository URL: cannot start with a dash")
+
+    logger.info("Executing shallow git clone for '%s' (branch: %s) into %s", clean_url, branch or "default", dest_dir)
 
     # Inject token into HTTPS URL if provided
     clone_url = clean_url
@@ -297,9 +310,11 @@ def shallow_clone_repo(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
+        logger.error("Git clone timed out after %ds for repository '%s'", timeout, clean_url)
         shutil.rmtree(dest_dir, ignore_errors=True)
         raise GitCloneError(f"Git clone timed out after {timeout} seconds") from exc
     except Exception as exc:
+        logger.exception("Failed to spawn git clone process for '%s': %s", clean_url, exc)
         shutil.rmtree(dest_dir, ignore_errors=True)
         raise GitCloneError(f"Failed to execute git clone: {exc}") from exc
 
@@ -307,8 +322,11 @@ def shallow_clone_repo(
         error_msg = proc.stderr.strip() or proc.stdout.strip()
         if github_token:
             error_msg = error_msg.replace(github_token, "******")
+        logger.error("Git clone failed (exit %d) for '%s': %s", proc.returncode, clean_url, error_msg)
         shutil.rmtree(dest_dir, ignore_errors=True)
         raise GitCloneError(f"Git clone failed (exit {proc.returncode}): {error_msg}")
+
+    logger.info("Git clone successfully cloned '%s' into %s", clean_url, dest_dir)
 
     # Write metadata after successful clone
     meta = {
@@ -648,24 +666,32 @@ async def upload_zip_endpoint(
                 if hasattr(value, "filename") and hasattr(value, "read"):
                     upload = value
                     break
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Error inspecting multipart form fields: %s", exc)
 
     if upload is None:
+        logger.warning("Zip upload rejected: no archive file detected in multipart request")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No archive file uploaded. Please provide a multipart .zip file.",
         )
 
+    filename = getattr(upload, "filename", "unnamed.zip")
+    logger.info("Processing zip upload: filename='%s'", filename)
+
     content_bytes = await upload.read()
     if not content_bytes:
+        logger.warning("Zip upload rejected: '%s' is empty (0 bytes)", filename)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Uploaded file is empty.",
         )
 
+    logger.info("Read %d bytes for archive '%s'", len(content_bytes), filename)
+
     # Validate that it is a valid zip archive
     if not zipfile.is_zipfile(io.BytesIO(content_bytes)):
+        logger.warning("Zip upload rejected: '%s' is not a valid zip archive magic header", filename)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Uploaded file is not a valid zip archive.",
@@ -674,7 +700,9 @@ async def upload_zip_endpoint(
     # Create isolated workspace
     try:
         workspace_id, workspace_path = workspace_manager.create_workspace()
+        logger.info("Allocated sandbox workspace '%s' at %s for upload '%s'", workspace_id, workspace_path, filename)
     except Exception as exc:
+        logger.exception("Failed to allocate sandbox workspace for upload '%s': %s", filename, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to initialize workspace: {exc}",
@@ -683,7 +711,9 @@ async def upload_zip_endpoint(
     # Unpack with Zip-Slip protection
     try:
         extracted_files = workspace_manager.unpack_zip(workspace_id, content_bytes)
+        logger.info("Unpacked %d files from '%s' into workspace '%s'", len(extracted_files), filename, workspace_id)
     except ZipSlipError as exc:
+        logger.warning("Zip-Slip security rejection for '%s' in workspace '%s': %s", filename, workspace_id, exc)
         # Clean up workspace immediately on security violation
         shutil.rmtree(workspace_path, ignore_errors=True)
         raise HTTPException(
@@ -691,6 +721,7 @@ async def upload_zip_endpoint(
             detail=f"Security error (Zip-Slip detected): {exc}",
         )
     except Exception as exc:
+        logger.exception("Unexpected error extracting '%s' into workspace '%s': %s", filename, workspace_id, exc)
         shutil.rmtree(workspace_path, ignore_errors=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -711,14 +742,24 @@ async def clone_github_endpoint(
 ) -> WorkspaceResponse:
     """Accept repo_url, branch, and optional github_token, and perform a shallow clone."""
     if not req.repo_url or not req.repo_url.strip():
+        logger.warning("GitHub clone rejected: empty repo_url")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="repo_url cannot be empty.",
         )
 
+    logger.info(
+        "Processing GitHub clone request: repo_url='%s', branch='%s', auth=%s",
+        req.repo_url,
+        req.branch or "default",
+        "token_provided" if req.github_token else "none",
+    )
+
     try:
         workspace_id, workspace_path = workspace_manager.create_workspace()
+        logger.info("Allocated sandbox workspace '%s' at %s for clone", workspace_id, workspace_path)
     except Exception as exc:
+        logger.exception("Failed to allocate workspace for clone: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to initialize workspace: {exc}",
@@ -731,13 +772,16 @@ async def clone_github_endpoint(
             branch=req.branch,
             github_token=req.github_token,
         )
+        logger.info("Successfully cloned '%s' into workspace '%s'", req.repo_url, workspace_id)
     except GitCloneError as exc:
+        logger.warning("Git clone failed for repo '%s' in workspace '%s': %s", req.repo_url, workspace_id, exc)
         shutil.rmtree(workspace_path, ignore_errors=True)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         )
     except Exception as exc:
+        logger.exception("Unexpected error during git clone for '%s' in workspace '%s': %s", req.repo_url, workspace_id, exc)
         shutil.rmtree(workspace_path, ignore_errors=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -746,6 +790,7 @@ async def clone_github_endpoint(
 
     # Count files in cloned workspace
     _, file_count = build_file_tree(workspace_path)
+    logger.info("Workspace '%s' ready with %d files", workspace_id, file_count)
 
     return WorkspaceResponse(
         workspace_id=workspace_id,
@@ -760,7 +805,10 @@ async def get_workspace_tree_endpoint(
     workspace_id: str,
 ) -> WorkspaceTreeResponse:
     """Return the file hierarchy with vendor/, node_modules/, .git/, .env filtered out."""
-    return workspace_manager.get_tree(workspace_id)
+    logger.info("Fetching file tree for workspace '%s'", workspace_id)
+    tree_resp = workspace_manager.get_tree(workspace_id)
+    logger.info("Workspace '%s' tree returned %d files", workspace_id, tree_resp.total_files)
+    return tree_resp
 
 
 @router.get("/{workspace_id}/file", response_model=WorkspaceFileContentResponse)
@@ -770,7 +818,9 @@ async def get_workspace_file_endpoint(
     request: Request = None,
 ) -> Any:
     """Return the raw contents of a specific legacy PHP file for rendering in the editor."""
+    logger.info("Reading workspace file: workspace_id='%s', path='%s'", workspace_id, path)
     file_info = workspace_manager.get_file_content(workspace_id, path)
+    logger.info("Successfully read file '%s' (%d bytes) for workspace '%s'", path, file_info.size, workspace_id)
 
     # Support raw text response if requested via Accept header
     if request and "text/plain" in request.headers.get("accept", ""):

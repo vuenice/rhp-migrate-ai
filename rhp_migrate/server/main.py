@@ -4,10 +4,23 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import logging
 import os
+import sys
+import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+
+# Initialize server-wide logging format and level
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] [%(name)s]: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
+)
+logger = logging.getLogger("rhp_migrate.server")
 
 from rhp_migrate.server.routes.analyze import router as analyze_router
 from rhp_migrate.server.routes.migrate import router as migrate_router
@@ -21,6 +34,7 @@ from rhp_migrate.server.workspace import (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan context for background tasks."""
+    logger.info("Initializing rhp-migrate-ai API server lifespan...")
     stop_event = asyncio.Event()
     cleanup_task = asyncio.create_task(
         periodic_workspace_cleanup_task(
@@ -32,6 +46,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        logger.info("Shutting down rhp-migrate-ai API server lifespan...")
         stop_event.set()
         cleanup_task.cancel()
         try:
@@ -55,6 +70,34 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
         lifespan=lifespan,
     )
+
+    # HTTP Request & Performance Logging Middleware
+    @app.middleware("http")
+    async def request_logging_middleware(request: Request, call_next):
+        start_time = time.time()
+        client_host = request.client.host if request.client else "unknown"
+        logger.info("--> %s %s from %s", request.method, request.url.path, client_host)
+        try:
+            response = await call_next(request)
+            elapsed_ms = (time.time() - start_time) * 1000
+            logger.info(
+                "<-- %s %s [%s] completed in %.1fms",
+                request.method,
+                request.url.path,
+                response.status_code,
+                elapsed_ms,
+            )
+            return response
+        except Exception as exc:
+            elapsed_ms = (time.time() - start_time) * 1000
+            logger.exception(
+                "<-- %s %s [ERROR] failed after %.1fms: %s",
+                request.method,
+                request.url.path,
+                elapsed_ms,
+                exc,
+            )
+            raise
 
     # Configure CORS middleware (configurable via CORS_ORIGINS or RHP_CORS_ORIGINS)
     cors_env = os.environ.get("CORS_ORIGINS") or os.environ.get("RHP_CORS_ORIGINS", "*")

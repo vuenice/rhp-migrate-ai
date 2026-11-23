@@ -44,3 +44,8 @@ node_modules/
 out/
 
 config.bat
+
+# Environment files
+.env
+.env.local
+.env.*.local

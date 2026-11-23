@@ -37,7 +37,9 @@ import {
   RotateCcw,
   CheckCircle2,
   FolderGit2,
+  FolderPlus,
 } from "lucide-react";
+import { NewProjectModal } from "@/components/NewProjectModal";
 
 // Rich default project files for instant interactive demo & fallback
 const DEMO_PROJECT_FILES: FileItem[] = [
@@ -318,12 +320,15 @@ export default function WorkbenchPage() {
   const workspaceId = (params?.workspaceId as string) || "demo";
 
   // State
-  const [files, setFiles] = useState<FileItem[]>(DEMO_PROJECT_FILES);
+  const [files, setFiles] = useState<FileItem[]>(
+    workspaceId === "demo" ? DEMO_PROJECT_FILES : []
+  );
   const [activeFile, setActiveFile] = useState<FileItem | null>(null);
   const [originalCode, setOriginalCode] = useState<string>("");
   const [modifiedCode, setModifiedCode] = useState<string>("");
   const [isTreeLoading, setIsTreeLoading] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isNewProjectOpen, setIsNewProjectOpen] = useState(false);
   const [byokConfig, setByokConfig] = useState<BYOKConfig>(getStoredBYOKConfig());
 
   // Compiler logs & AST scorecard
@@ -367,8 +372,14 @@ export default function WorkbenchPage() {
     [activeFile]
   );
 
-  // Load workspace file tree from FastAPI backend (or fallback to demo files)
+  // Load workspace file tree from FastAPI backend (or fallback to demo files if workspaceId === 'demo')
   const fetchWorkspaceTree = useCallback(async () => {
+    if (workspaceId === "demo") {
+      setFiles(DEMO_PROJECT_FILES);
+      addCompilerLog("info", `Loaded workspace 'demo' with demo project files.`);
+      return;
+    }
+
     setIsTreeLoading(true);
     try {
       const res = await fetch(`/api/workspace/${workspaceId}/tree`);
@@ -391,15 +402,14 @@ export default function WorkbenchPage() {
           return;
         }
       }
+      setFiles([]);
+      addCompilerLog("warn", `Workspace '${workspaceId}' not found or empty.`);
     } catch {
-      // Backend not running or demo workspace, proceed with demo fallback
+      setFiles([]);
+      addCompilerLog("warn", `Could not connect to backend to fetch workspace tree.`);
     } finally {
       setIsTreeLoading(false);
     }
-
-    // Default to demo files
-    setFiles(DEMO_PROJECT_FILES);
-    addCompilerLog("info", `Loaded workspace '${workspaceId}' with demo project files.`);
   }, [workspaceId, addCompilerLog]);
 
   useEffect(() => {
@@ -408,48 +418,68 @@ export default function WorkbenchPage() {
 
   // Select initial file
   useEffect(() => {
-    if (!activeFile && files.length > 0) {
-      const firstFile = SAMPLE_PHP_CODE["app/Services/PaymentService.php"];
-      if (firstFile) {
-        const target: FileItem = {
-          name: "PaymentService.php",
-          path: "app/Services/PaymentService.php",
-          type: "file",
-          classification: "Service",
-          status: "warning",
+    if (workspaceId === "demo") {
+      if (!activeFile && files.length > 0) {
+        const firstFile = SAMPLE_PHP_CODE["app/Services/PaymentService.php"];
+        if (firstFile) {
+          const target: FileItem = {
+            name: "PaymentService.php",
+            path: "app/Services/PaymentService.php",
+            type: "file",
+            classification: "Service",
+            status: "warning",
+          };
+          setActiveFile(target);
+          setOriginalCode(firstFile.php);
+          setModifiedCode(firstFile.rhp);
+          setScorecard(firstFile.scorecard);
+
+          setCompilerLogs([
+            {
+              id: "1",
+              timestamp: new Date().toLocaleTimeString(),
+              level: "info",
+              message: "RHP Language Engine v0.1.0 initialized.",
+            },
+            {
+              id: "2",
+              timestamp: new Date().toLocaleTimeString(),
+              level: "warn",
+              message: "Untyped parameters detected in PaymentService::charge(). Manual hint recommended.",
+            },
+          ]);
+
+          setChatMessages([
+            {
+              id: "m1",
+              role: "assistant",
+              content:
+                "Welcome to the RHP Migration Workbench! I have inspected PaymentService.php. It has an AST readiness score of 74%. You can instruct me to specialize arrays or convert types using the chat below.",
+              timestamp: new Date().toLocaleTimeString(),
+            },
+          ]);
+        }
+      }
+    } else {
+      if (!activeFile && files.length > 0) {
+        // Find first file in workspace
+        const collectFirst = (items: FileItem[]): FileItem | null => {
+          for (const it of items) {
+            if (it.type === "file") return it;
+            if (it.children) {
+              const nested = collectFirst(it.children);
+              if (nested) return nested;
+            }
+          }
+          return null;
         };
-        setActiveFile(target);
-        setOriginalCode(firstFile.php);
-        setModifiedCode(firstFile.rhp);
-        setScorecard(firstFile.scorecard);
-
-        setCompilerLogs([
-          {
-            id: "1",
-            timestamp: new Date().toLocaleTimeString(),
-            level: "info",
-            message: "RHP Language Engine v0.1.0 initialized.",
-          },
-          {
-            id: "2",
-            timestamp: new Date().toLocaleTimeString(),
-            level: "warn",
-            message: "Untyped parameters detected in PaymentService::charge(). Manual hint recommended.",
-          },
-        ]);
-
-        setChatMessages([
-          {
-            id: "m1",
-            role: "assistant",
-            content:
-              "Welcome to the RHP Migration Workbench! I have inspected PaymentService.php. It has an AST readiness score of 74%. You can instruct me to specialize arrays or convert types using the chat below.",
-            timestamp: new Date().toLocaleTimeString(),
-          },
-        ]);
+        const first = collectFirst(files);
+        if (first) {
+          handleSelectFile(first);
+        }
       }
     }
-  }, [files, activeFile]);
+  }, [files, activeFile, workspaceId]);
 
   // Handle file selection from FileTree
   const handleSelectFile = async (file: FileItem) => {
@@ -729,6 +759,16 @@ export default function WorkbenchPage() {
 
         {/* Global Action Controls */}
         <div className="flex items-center gap-2">
+          {/* Start New Project Trigger */}
+          <button
+            type="button"
+            onClick={() => setIsNewProjectOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-600/40 bg-emerald-950/30 text-emerald-300 hover:bg-emerald-900/40 hover:text-emerald-200 transition-colors text-xs font-medium"
+          >
+            <FolderPlus className="h-3.5 w-3.5 text-emerald-400" />
+            <span>New Project</span>
+          </button>
+
           {/* BYOK Settings Trigger */}
           <button
             type="button"
@@ -758,27 +798,53 @@ export default function WorkbenchPage() {
             onSelectFile={handleSelectFile}
             isLoading={isTreeLoading}
             onRefresh={fetchWorkspaceTree}
+            onNewProject={() => setIsNewProjectOpen(true)}
           />
         </div>
 
         {/* Center Panel: 55% width */}
         <div className="flex-1 min-w-[400px] h-full flex flex-col overflow-hidden">
-          <MonacoDiffViewer
-            originalCode={originalCode}
-            modifiedCode={modifiedCode}
-            activeFile={activeFile}
-            onChangeModified={setModifiedCode}
-            isStreaming={isStreaming}
-            onMigrateClick={() => handleMigrate()}
-            onVerifyClick={handleRunCompilerCheck}
-            onMount={setEditorInstance}
-            onAcceptAndNext={handleAcceptAndNext}
-            onRepromptCritic={handleRepromptCritic}
-            migrationStep={migrationStep}
-            diagnostics={diagnostics}
-            isVerified={isVerified}
-            hasNextFile={hasNextFile}
-          />
+          {files.length === 0 && !isTreeLoading ? (
+            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-5 bg-neutral-950">
+              <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-neutral-900 border border-neutral-800 shadow-[0_0_24px_rgba(16,185,129,0.15)] text-emerald-400">
+                <FolderPlus className="h-8 w-8 text-emerald-400" />
+              </div>
+              <div className="space-y-1.5">
+                <h2 className="text-xl font-bold tracking-tight text-neutral-100">
+                  Workspace is Empty
+                </h2>
+                <p className="text-xs text-neutral-400 max-w-sm leading-relaxed">
+                  No files found in workspace &lsquo;<span className="font-mono text-emerald-400">{workspaceId}</span>&rsquo;. Import a PHP project archive or clone a repository to begin migration.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsNewProjectOpen(true)}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium text-xs shadow-lg shadow-emerald-950/50 transition-all transform hover:-translate-y-0.5 active:translate-y-0"
+              >
+                <FolderPlus className="h-4 w-4" />
+                <span>Start New Project</span>
+                <ArrowRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : (
+            <MonacoDiffViewer
+              originalCode={originalCode}
+              modifiedCode={modifiedCode}
+              activeFile={activeFile}
+              onChangeModified={setModifiedCode}
+              isStreaming={isStreaming}
+              onMigrateClick={() => handleMigrate()}
+              onVerifyClick={handleRunCompilerCheck}
+              onMount={setEditorInstance}
+              onAcceptAndNext={handleAcceptAndNext}
+              onRepromptCritic={handleRepromptCritic}
+              migrationStep={migrationStep}
+              diagnostics={diagnostics}
+              isVerified={isVerified}
+              hasNextFile={hasNextFile}
+            />
+          )}
         </div>
 
         {/* Right Panel: 25% width */}
@@ -802,7 +868,13 @@ export default function WorkbenchPage() {
         </div>
       </div>
 
-      {/* 3. BYOK Settings Modal */}
+      {/* 3. New Project Modal */}
+      <NewProjectModal
+        isOpen={isNewProjectOpen}
+        onClose={() => setIsNewProjectOpen(false)}
+      />
+
+      {/* 4. BYOK Settings Modal */}
       <BYOKSettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
-import dynamic from "next/dynamic";
+import { DiffEditor } from "@monaco-editor/react";
 import {
   FileCode2,
   Copy,
@@ -21,22 +21,6 @@ import {
 } from "lucide-react";
 import { FileItem, FileStatus } from "@/types/workbench";
 import { DiagnosticError, MigrationStep } from "@/hooks/useMigrationStream";
-
-// Dynamically import Monaco DiffEditor to prevent SSR window issues in Next.js
-const DiffEditor = dynamic(
-  () => import("@monaco-editor/react").then((mod) => mod.DiffEditor),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="flex h-full w-full items-center justify-center bg-neutral-950 text-neutral-400">
-        <div className="flex items-center gap-2 text-xs">
-          <Loader2 className="h-4 w-4 animate-spin text-emerald-500" />
-          <span>Loading Monaco Diff Editor...</span>
-        </div>
-      </div>
-    ),
-  }
-);
 
 interface MonacoDiffViewerProps {
   originalCode: string;
@@ -73,7 +57,12 @@ export function MonacoDiffViewer({
 }: MonacoDiffViewerProps) {
   const [copied, setCopied] = useState(false);
   const [renderSideBySide, setRenderSideBySide] = useState(true);
+  const [isMounted, setIsMounted] = useState(false);
   const diffEditorRef = useRef<any>(null);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
 
   // Handle editor mount with editor & monaco instances
   const handleEditorDidMount = (editor: any, monaco: any) => {
@@ -414,28 +403,49 @@ export function MonacoDiffViewer({
 
       {/* Monaco Diff Editor Canvas */}
       <div className="flex-1 w-full h-full relative">
-        <DiffEditor
-          original={originalCode || "// Select a file to view original PHP source"}
-          modified={modifiedCode || "// RHP code will be generated or can be typed here"}
-          language="php"
-          theme="vs-dark"
-          onMount={handleEditorDidMount}
-          options={{
-            readOnly: false,
-            originalEditable: false,
-            renderSideBySide: renderSideBySide,
-            automaticLayout: true,
-            minimap: { enabled: false },
-            scrollBeyondLastLine: false,
-            fontSize: 13,
-            lineHeight: 20,
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-            renderWhitespace: "selection",
-            diffWordWrap: "on",
-            folding: true,
-            wordWrap: "on",
-          }}
-        />
+        {!activeFile ? (
+          <div className="flex h-full w-full flex-col items-center justify-center p-8 text-center space-y-3 bg-neutral-950 text-neutral-400 select-none">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-neutral-900 border border-neutral-800 text-neutral-500">
+              <FileCode2 className="h-6 w-6" />
+            </div>
+            <div className="space-y-1">
+              <h3 className="text-sm font-medium text-neutral-200">No File Selected</h3>
+              <p className="text-xs text-neutral-500 max-w-xs">
+                Select a file from the explorer on the left to inspect its original PHP code, view AST readiness, and generate strict RHP.
+              </p>
+            </div>
+          </div>
+        ) : !isMounted ? (
+          <div className="flex h-full w-full items-center justify-center bg-neutral-950 text-neutral-400">
+            <div className="flex items-center gap-2 text-xs">
+              <Loader2 className="h-4 w-4 animate-spin text-emerald-500" />
+              <span>Loading Monaco Diff Editor...</span>
+            </div>
+          </div>
+        ) : (
+          <DiffEditor
+            original={originalCode || "// Original PHP source"}
+            modified={modifiedCode || "// RHP code will be generated or can be typed here"}
+            language="php"
+            theme="vs-dark"
+            onMount={handleEditorDidMount}
+            options={{
+              readOnly: false,
+              originalEditable: false,
+              renderSideBySide: renderSideBySide,
+              automaticLayout: true,
+              minimap: { enabled: false },
+              scrollBeyondLastLine: false,
+              fontSize: 13,
+              lineHeight: 20,
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+              renderWhitespace: "selection",
+              diffWordWrap: "on",
+              folding: true,
+              wordWrap: "on",
+            }}
+          />
+        )}
       </div>
     </main>
   );
