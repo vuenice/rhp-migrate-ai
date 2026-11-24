@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   Folder,
   FolderOpen,
@@ -12,6 +12,8 @@ import {
   SlidersHorizontal,
   FolderTree,
   FolderPlus,
+  LayoutDashboard,
+  ArrowRight,
 } from "lucide-react";
 import { FileItem, FileStatus } from "@/types/workbench";
 
@@ -19,6 +21,7 @@ interface FileTreeProps {
   files: FileItem[];
   selectedFilePath: string | null;
   onSelectFile: (file: FileItem) => void;
+  onSelectOverview?: () => void;
   isLoading?: boolean;
   onRefresh?: () => void;
   onNewProject?: () => void;
@@ -173,19 +176,55 @@ export function FileTree({
   files,
   selectedFilePath,
   onSelectFile,
+  onSelectOverview,
   isLoading,
   onRefresh,
   onNewProject,
 }: FileTreeProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => {
-    // Expand root directories by default
     const set = new Set<string>();
     files.forEach((f) => {
       if (f.type === "directory") set.add(f.path);
     });
     return set;
   });
+
+  // Auto-expand root folders when files load or update
+  useEffect(() => {
+    if (files.length > 0) {
+      setExpandedPaths((prev) => {
+        const next = new Set(prev);
+        files.forEach((f) => {
+          if (f.type === "directory") {
+            next.add(f.path);
+            if (f.children) {
+              f.children.forEach((c) => {
+                if (c.type === "directory") next.add(c.path);
+              });
+            }
+          }
+        });
+        return next;
+      });
+    }
+  }, [files]);
+
+  // Auto-expand parent directories of selectedFilePath
+  useEffect(() => {
+    if (selectedFilePath) {
+      const parts = selectedFilePath.split("/");
+      setExpandedPaths((prev) => {
+        const next = new Set(prev);
+        let curr = "";
+        for (let i = 0; i < parts.length - 1; i++) {
+          curr = curr ? `${curr}/${parts[i]}` : parts[i];
+          next.add(curr);
+        }
+        return next;
+      });
+    }
+  }, [selectedFilePath]);
 
   const toggleExpand = (path: string) => {
     setExpandedPaths((prev) => {
@@ -348,6 +387,37 @@ export function FileTree({
         </div>
       </div>
 
+      {/* Project Overview Selector */}
+      {onSelectOverview && (
+        <div className="px-2 pt-2 pb-1.5 border-b border-neutral-800/80 bg-neutral-900/60">
+          <button
+            type="button"
+            onClick={onSelectOverview}
+            className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all group cursor-pointer ${
+              selectedFilePath === null
+                ? "bg-emerald-950/70 text-emerald-300 border border-emerald-500/50 shadow-sm shadow-emerald-950/50"
+                : "bg-neutral-800/70 border border-neutral-700/60 text-neutral-200 hover:bg-emerald-950/50 hover:border-emerald-500/40 hover:text-emerald-300"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <LayoutDashboard
+                className={`h-3.5 w-3.5 transition-colors ${
+                  selectedFilePath === null ? "text-emerald-400" : "text-emerald-400/90 group-hover:text-emerald-300"
+                }`}
+              />
+              <span>Project Overview</span>
+            </div>
+            <ArrowRight
+              className={`h-3.5 w-3.5 transition-all transform ${
+                selectedFilePath === null
+                  ? "text-emerald-400 translate-x-0.5"
+                  : "text-neutral-400 group-hover:text-emerald-300 group-hover:translate-x-0.5"
+              }`}
+            />
+          </button>
+        </div>
+      )}
+
       {/* Filter / Search input */}
       <div className="p-2 border-b border-neutral-800/80 bg-neutral-900">
         <div className="relative">
@@ -367,7 +437,7 @@ export function FileTree({
         {filteredFiles.length === 0 ? (
           <div className="flex flex-col items-center justify-center p-6 text-center text-xs text-neutral-400 space-y-3">
             <FolderTree className="h-8 w-8 text-neutral-600" />
-            <span>{searchTerm ? "No matching files found" : "Workspace is empty"}</span>
+            <span>{searchTerm ? "No matching files found" : "No files found"}</span>
             {!searchTerm && onNewProject && (
               <button
                 type="button"

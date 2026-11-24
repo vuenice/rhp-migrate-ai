@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
-import { DiffEditor } from "@monaco-editor/react";
+import { Editor, DiffEditor } from "@monaco-editor/react";
 import {
   FileCode2,
   Copy,
@@ -15,11 +15,13 @@ import {
   Loader2,
   Sparkles,
   ArrowRight,
+  ArrowLeft,
   CheckCircle2,
   RefreshCw,
   AlertCircle,
+  Zap,
 } from "lucide-react";
-import { FileItem, FileStatus } from "@/types/workbench";
+import { FileItem, FileStatus, ASTScorecardData } from "@/types/workbench";
 import { DiagnosticError, MigrationStep } from "@/hooks/useMigrationStream";
 
 interface MonacoDiffViewerProps {
@@ -33,6 +35,9 @@ interface MonacoDiffViewerProps {
   onMount?: (editor: any, monaco: any) => void;
   onAcceptAndNext?: () => void;
   onRepromptCritic?: () => void;
+  onBackToOverview?: () => void;
+  hasMigrated?: boolean;
+  scorecard?: ASTScorecardData | null;
   migrationStep?: MigrationStep;
   diagnostics?: DiagnosticError[];
   isVerified?: boolean | null;
@@ -50,6 +55,9 @@ export function MonacoDiffViewer({
   onMount,
   onAcceptAndNext,
   onRepromptCritic,
+  onBackToOverview,
+  hasMigrated,
+  scorecard,
   migrationStep = "idle",
   diagnostics = [],
   isVerified = null,
@@ -58,6 +66,7 @@ export function MonacoDiffViewer({
   const [copied, setCopied] = useState(false);
   const [renderSideBySide, setRenderSideBySide] = useState(true);
   const [isMounted, setIsMounted] = useState(false);
+  const [showRawPreMigrationEditor, setShowRawPreMigrationEditor] = useState(false);
   const diffEditorRef = useRef<any>(null);
 
   useEffect(() => {
@@ -134,12 +143,31 @@ export function MonacoDiffViewer({
 
   const rhpFileName = activeFile.name.replace(/\.php$/i, ".rhp");
 
+  const isFileMigrated = Boolean(
+    hasMigrated ||
+    activeFile.status === "migrated" ||
+    activeFile.status === "warning" ||
+    migrationStep === "done"
+  );
+
   return (
     <main className="flex flex-col h-full bg-neutral-950 border-r border-neutral-800 overflow-hidden">
       {/* Editor Header / Breadcrumbs & Action Toolbar */}
       <div className="flex flex-wrap items-center justify-between border-b border-neutral-800 bg-neutral-900/90 px-4 py-2 gap-2 text-xs">
-        {/* Left: File breadcrumb & Status */}
+        {/* Left: Overview back button, File breadcrumb & Status */}
         <div className="flex items-center gap-2 min-w-0">
+          {onBackToOverview && (
+            <button
+              type="button"
+              onClick={onBackToOverview}
+              title="Return to Project Overview"
+              className="flex items-center gap-1 px-2.5 py-1 rounded-md border border-neutral-800 bg-neutral-950 text-neutral-400 hover:bg-neutral-800 hover:text-white transition-colors shrink-0 text-[11px]"
+            >
+              <ArrowLeft className="h-3.5 w-3.5 text-neutral-400" />
+              <span>Overview</span>
+            </button>
+          )}
+
           <div className="flex items-center gap-1.5 font-mono text-neutral-300 truncate">
             <FileCode2 className="h-4 w-4 text-sky-400 shrink-0" />
             <span className="text-neutral-400 truncate">{activeFile.path}</span>
@@ -167,6 +195,13 @@ export function MonacoDiffViewer({
               Streaming RHP...
             </span>
           )}
+
+          {!isFileMigrated && !isStreaming && (
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-neutral-800/80 text-neutral-400 border border-neutral-700/80 text-[10px] font-mono">
+              <span className="h-1.5 w-1.5 rounded-full bg-neutral-500" />
+              Pending Migration
+            </span>
+          )}
         </div>
 
         {/* Right Toolbar Actions */}
@@ -191,11 +226,11 @@ export function MonacoDiffViewer({
             )}
           </button>
 
-          {/* Copy RHP */}
+          {/* Copy RHP (or code) */}
           <button
             type="button"
             onClick={handleCopy}
-            title="Copy Migrated RHP code"
+            title={isFileMigrated ? "Copy Migrated RHP code" : "Copy code"}
             className="flex items-center gap-1 px-2.5 py-1 rounded border border-neutral-800 bg-neutral-950 text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100 transition-colors"
           >
             {copied ? (
@@ -206,90 +241,97 @@ export function MonacoDiffViewer({
             ) : (
               <>
                 <Copy className="h-3.5 w-3.5" />
-                <span className="text-[11px]">Copy RHP</span>
+                <span className="text-[11px]">{isFileMigrated ? "Copy RHP" : "Copy"}</span>
               </>
             )}
           </button>
 
-          {/* Revert */}
-          <button
-            type="button"
-            onClick={handleRevert}
-            title="Revert RHP changes to original PHP source"
-            className="flex items-center gap-1 px-2 py-1 rounded border border-neutral-800 bg-neutral-950 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200 transition-colors"
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-          </button>
-
-          {/* Verify / Check button */}
-          {onVerifyClick && (
+          {/* Revert (after migration) */}
+          {isFileMigrated && (
             <button
               type="button"
-              onClick={onVerifyClick}
-              disabled={isStreaming}
-              title="Run rhp check syntax and type verification"
-              className="flex items-center gap-1 px-2.5 py-1 rounded border border-neutral-700 bg-neutral-800 text-neutral-200 hover:bg-neutral-700 disabled:opacity-50 transition-colors"
+              onClick={handleRevert}
+              title="Revert RHP changes to original PHP source"
+              className="flex items-center gap-1 px-2 py-1 rounded border border-neutral-800 bg-neutral-950 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200 transition-colors"
             >
-              <ShieldCheck className="h-3.5 w-3.5 text-sky-400" />
-              <span className="text-[11px]">rhp check</span>
+              <RotateCcw className="h-3.5 w-3.5" />
             </button>
           )}
 
-          {/* Re-prompt with Critic button */}
-          {onRepromptCritic && (
-            <button
-              type="button"
-              onClick={onRepromptCritic}
-              disabled={isStreaming}
-              title="Re-prompt Critic loop with compiler diagnostics for automated repair"
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded border border-amber-600/40 bg-amber-950/40 text-amber-300 hover:bg-amber-900/50 hover:text-amber-100 disabled:opacity-50 transition-colors font-medium text-[11px] shadow-sm"
-            >
-              <RefreshCw
-                className={`h-3 w-3 ${
-                  isStreaming && migrationStep === "critic_review" ? "animate-spin" : ""
-                }`}
-              />
-              <span>Re-prompt with Critic</span>
-              {diagnostics.length > 0 && (
-                <span className="px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[10px] font-mono border border-amber-500/30">
-                  {diagnostics.length}
-                </span>
+          {/* POST-MIGRATION ACTIONS */}
+          {isFileMigrated && (
+            <>
+              {/* Verify / Check button */}
+              {onVerifyClick && (
+                <button
+                  type="button"
+                  onClick={onVerifyClick}
+                  disabled={isStreaming}
+                  title="Run rhp check syntax and type verification"
+                  className="flex items-center gap-1 px-2.5 py-1 rounded border border-neutral-700 bg-neutral-800 text-neutral-200 hover:bg-neutral-700 disabled:opacity-50 transition-colors"
+                >
+                  <ShieldCheck className="h-3.5 w-3.5 text-sky-400" />
+                  <span className="text-[11px]">rhp check</span>
+                </button>
               )}
-            </button>
+
+              {/* Re-prompt with Critic button */}
+              {onRepromptCritic && (
+                <button
+                  type="button"
+                  onClick={onRepromptCritic}
+                  disabled={isStreaming}
+                  title="Re-prompt Critic loop with compiler diagnostics for automated repair"
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded border border-amber-600/40 bg-amber-950/40 text-amber-300 hover:bg-amber-900/50 hover:text-amber-100 disabled:opacity-50 transition-colors font-medium text-[11px] shadow-sm"
+                >
+                  <RefreshCw
+                    className={`h-3 w-3 ${
+                      isStreaming && migrationStep === "critic_review" ? "animate-spin" : ""
+                    }`}
+                  />
+                  <span>Re-prompt Critic</span>
+                  {diagnostics.length > 0 && (
+                    <span className="px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[10px] font-mono border border-amber-500/30">
+                      {diagnostics.length}
+                    </span>
+                  )}
+                </button>
+              )}
+
+              {/* Accept & Next File button (Primary CTA after migration) */}
+              {onAcceptAndNext && (
+                <button
+                  type="button"
+                  onClick={onAcceptAndNext}
+                  disabled={isStreaming}
+                  title="Accept current RHP code and advance to next pending file"
+                  className="flex items-center gap-1.5 px-3.5 py-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50 shadow-[0_0_12px_rgba(16,185,129,0.3)] font-medium transition-colors text-[11px]"
+                >
+                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-200" />
+                  <span>Accept &amp; Next File</span>
+                  <ArrowRight className="h-3 w-3" />
+                </button>
+              )}
+            </>
           )}
 
-          {/* Accept & Next File button */}
-          {onAcceptAndNext && (
-            <button
-              type="button"
-              onClick={onAcceptAndNext}
-              disabled={isStreaming}
-              title="Accept current RHP code and advance to next pending file"
-              className="flex items-center gap-1.5 px-3 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50 shadow-sm font-medium transition-colors text-[11px]"
-            >
-              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-200" />
-              <span>Accept &amp; Next File</span>
-              <ArrowRight className="h-3 w-3" />
-            </button>
-          )}
-
-          {/* AI Migrate Button */}
-          {onMigrateClick && (
+          {/* PRE-MIGRATION PRIMARY CTA */}
+          {!isFileMigrated && onMigrateClick && (
             <button
               type="button"
               onClick={onMigrateClick}
               disabled={isStreaming}
-              className="flex items-center gap-1.5 px-3 py-1 rounded bg-sky-600 text-white hover:bg-sky-500 disabled:opacity-50 shadow-sm font-medium transition-colors text-[11px]"
+              className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium shadow-[0_0_16px_rgba(16,185,129,0.3)] hover:shadow-[0_0_24px_rgba(16,185,129,0.5)] disabled:opacity-50 transition-all text-xs"
             >
               {isStreaming ? (
                 <>
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  <span className="text-[11px]">Streaming...</span>
+                  <span>Streaming RHP...</span>
                 </>
               ) : (
                 <>
-                  <Sparkles className="h-3.5 w-3.5" />
-                  <span className="text-[11px]">Migrate with AI</span>
+                  <Zap className="h-3.5 w-3.5 text-emerald-200" />
+                  <span>Start Migration with AI</span>
                 </>
               )}
             </button>
@@ -385,23 +427,43 @@ export function MonacoDiffViewer({
 
       {/* Pane Labels */}
       <div className="grid grid-cols-2 bg-neutral-950 border-b border-neutral-800/80 text-[11px] font-mono select-none">
-        <div className="px-4 py-1 text-neutral-400 border-r border-neutral-800 flex items-center justify-between">
+        <div className="px-4 py-1.5 text-neutral-400 border-r border-neutral-800 flex items-center justify-between">
           <span className="flex items-center gap-1.5">
             <span className="h-1.5 w-1.5 rounded-full bg-rose-400/80" />
-            Original PHP 8.x (Read-Only)
+            Original PHP 8.x (Source Code)
           </span>
           <span className="text-[10px] text-neutral-600">Left Pane</span>
         </div>
-        <div className="px-4 py-1 text-emerald-400 flex items-center justify-between bg-neutral-900/30">
+        <div
+          className={`px-4 py-1.5 flex items-center justify-between ${
+            isFileMigrated
+              ? "text-emerald-400 bg-neutral-900/40"
+              : isStreaming
+              ? "text-sky-400 bg-sky-950/20"
+              : "text-neutral-400 bg-neutral-900/20"
+          }`}
+        >
           <span className="flex items-center gap-1.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-            Generated RHP Strict (Editable & Streamed)
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                isFileMigrated
+                  ? "bg-emerald-400"
+                  : isStreaming
+                  ? "bg-sky-400 animate-ping"
+                  : "bg-neutral-500"
+              }`}
+            />
+            {isFileMigrated
+              ? "Generated RHP Strict (Editable & Streamed)"
+              : isStreaming
+              ? "Streaming RHP Strict Transpilation..."
+              : "RHP Strict Target (Pending Generation)"}
           </span>
           <span className="text-[10px] text-neutral-500">Right Pane</span>
         </div>
       </div>
 
-      {/* Monaco Diff Editor Canvas */}
+      {/* Monaco Diff Editor Canvas or Pre-Migration Screen */}
       <div className="flex-1 w-full h-full relative">
         {!activeFile ? (
           <div className="flex h-full w-full flex-col items-center justify-center p-8 text-center space-y-3 bg-neutral-950 text-neutral-400 select-none">
@@ -411,7 +473,7 @@ export function MonacoDiffViewer({
             <div className="space-y-1">
               <h3 className="text-sm font-medium text-neutral-200">No File Selected</h3>
               <p className="text-xs text-neutral-500 max-w-xs">
-                Select a file from the explorer on the left to inspect its original PHP code, view AST readiness, and generate strict RHP.
+                Select a file from the explorer on the left or project overview to inspect its code, view AST readiness, and generate strict RHP.
               </p>
             </div>
           </div>
@@ -422,29 +484,121 @@ export function MonacoDiffViewer({
               <span>Loading Monaco Diff Editor...</span>
             </div>
           </div>
+        ) : !isFileMigrated && !isStreaming && !showRawPreMigrationEditor ? (
+          /* PRE-MIGRATION SPLIT VIEW: Left is Source Code, Right is Pre-Migration Readiness Card */
+          <div className="flex w-full h-full">
+            {/* Left: Original Code Viewer */}
+            <div className="w-1/2 h-full border-r border-neutral-800">
+              <Editor
+                value={originalCode || "// Original PHP source"}
+                language="php"
+                theme="vs-dark"
+                options={{
+                  readOnly: true,
+                  minimap: { enabled: false },
+                  automaticLayout: true,
+                  fontSize: 13,
+                  lineHeight: 20,
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                  wordWrap: "on",
+                }}
+              />
+            </div>
+
+            {/* Right: Pre-Migration State Card */}
+            <div className="w-1/2 h-full flex flex-col items-center justify-center p-8 text-center bg-neutral-950/80 space-y-5 select-none overflow-y-auto">
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-tr from-emerald-950 to-neutral-900 border border-emerald-500/30 text-emerald-400 shadow-[0_0_24px_rgba(16,185,129,0.2)]">
+                <Sparkles className="h-7 w-7 text-emerald-400" />
+              </div>
+
+              <div className="space-y-2 max-w-sm">
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-neutral-900 border border-neutral-700 text-neutral-300 text-[11px] font-mono">
+                  <span className="h-2 w-2 rounded-full bg-amber-400" />
+                  <span>Pending Strict AOT Compilation</span>
+                </div>
+                <h3 className="text-base font-bold text-neutral-100">
+                  Ready for Strict RHP Transpilation
+                </h3>
+                <p className="text-xs text-neutral-400 leading-relaxed">
+                  This file has not been transpiled to RHP yet. Start migration to infer strict types, convert dynamic arrays to typed dicts, and verify with ahead-of-time compiler checks.
+                </p>
+              </div>
+
+              {/* AST Readiness preview */}
+              {scorecard && (
+                <div className="flex items-center gap-3 px-3.5 py-2 rounded-xl bg-neutral-900 border border-neutral-800 text-xs font-mono">
+                  <span className="text-neutral-400">AST Readiness:</span>
+                  <span className="text-emerald-400 font-bold">{scorecard.readinessPercentage}%</span>
+                  {scorecard.untypedParamCount > 0 && (
+                    <span className="text-amber-400">
+                      ({scorecard.untypedParamCount} untyped param{scorecard.untypedParamCount > 1 ? "s" : ""})
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div className="flex flex-col items-center gap-2.5 pt-2">
+                {onMigrateClick && (
+                  <button
+                    type="button"
+                    onClick={onMigrateClick}
+                    className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium text-xs shadow-[0_0_20px_rgba(16,185,129,0.3)] hover:shadow-[0_0_28px_rgba(16,185,129,0.5)] transition-all transform hover:-translate-y-0.5 active:translate-y-0"
+                  >
+                    <Zap className="h-4 w-4 text-emerald-200" />
+                    <span>Start Migration with AI</span>
+                    <ArrowRight className="h-3.5 w-3.5 text-emerald-200" />
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setShowRawPreMigrationEditor(true)}
+                  className="text-[11px] text-neutral-500 hover:text-neutral-300 underline transition-colors"
+                >
+                  Or open in raw diff editor
+                </button>
+              </div>
+            </div>
+          </div>
         ) : (
-          <DiffEditor
-            original={originalCode || "// Original PHP source"}
-            modified={modifiedCode || "// RHP code will be generated or can be typed here"}
-            language="php"
-            theme="vs-dark"
-            onMount={handleEditorDidMount}
-            options={{
-              readOnly: false,
-              originalEditable: false,
-              renderSideBySide: renderSideBySide,
-              automaticLayout: true,
-              minimap: { enabled: false },
-              scrollBeyondLastLine: false,
-              fontSize: 13,
-              lineHeight: 20,
-              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-              renderWhitespace: "selection",
-              diffWordWrap: "on",
-              folding: true,
-              wordWrap: "on",
-            }}
-          />
+          /* MIGRATED OR STREAMING OR RAW DIFF EDITOR */
+          <div className="w-full h-full relative">
+            {!isFileMigrated && showRawPreMigrationEditor && (
+              <div className="absolute top-2 right-4 z-10 flex items-center gap-2 px-2.5 py-1 rounded-md bg-neutral-900/90 border border-neutral-700 text-[11px] text-neutral-300 shadow-md">
+                <span>Pre-Migration Draft Mode</span>
+                <button
+                  type="button"
+                  onClick={() => setShowRawPreMigrationEditor(false)}
+                  className="text-emerald-400 hover:underline"
+                >
+                  Back to Card
+                </button>
+              </div>
+            )}
+            <DiffEditor
+              original={originalCode || "// Original PHP source"}
+              modified={modifiedCode || "// RHP code will be generated or can be typed here"}
+              language="php"
+              theme="vs-dark"
+              onMount={handleEditorDidMount}
+              options={{
+                readOnly: false,
+                originalEditable: false,
+                renderSideBySide: renderSideBySide,
+                automaticLayout: true,
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                fontSize: 13,
+                lineHeight: 20,
+                fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                renderWhitespace: "selection",
+                diffWordWrap: "on",
+                folding: true,
+                wordWrap: "on",
+              }}
+            />
+          </div>
         )}
       </div>
     </main>

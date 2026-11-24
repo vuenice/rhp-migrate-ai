@@ -23,18 +23,21 @@ import {
   getStoredBYOKConfig,
   saveBYOKConfig,
   buildBYOKHeaders,
+  isBYOKConfigured,
 } from "@/lib/byok";
 
 interface BYOKSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   onConfigSaved?: (config: BYOKConfig) => void;
+  isMandatory?: boolean;
 }
 
 export function BYOKSettingsModal({
   isOpen,
   onClose,
   onConfigSaved,
+  isMandatory = false,
 }: BYOKSettingsModalProps) {
   const [config, setConfig] = useState<BYOKConfig>(getStoredBYOKConfig());
   const [showApiKey, setShowApiKey] = useState(false);
@@ -85,10 +88,26 @@ export function BYOKSettingsModal({
   };
 
   const handleSave = () => {
-    saveBYOKConfig(config);
+    const meta = PROVIDERS.find((p) => p.id === config.provider) || PROVIDERS[0];
+    if (meta.requiresApiKey && !config.apiKey?.trim()) {
+      setTestingStatus("error");
+      setStatusMessage(`API Key is required for ${meta.name}. Setup is mandatory before migrating code.`);
+      return;
+    }
+    if (config.provider === "ollama" && !config.apiBase?.trim()) {
+      setTestingStatus("error");
+      setStatusMessage("Base URL is required for Local Ollama.");
+      return;
+    }
+
+    const updated: BYOKConfig = {
+      ...config,
+      isConfigured: true,
+    };
+    saveBYOKConfig(updated);
     setSaveSuccess(true);
     if (onConfigSaved) {
-      onConfigSaved(config);
+      onConfigSaved(updated);
     }
     setTimeout(() => {
       setSaveSuccess(false);
@@ -101,7 +120,7 @@ export function BYOKSettingsModal({
     setStatusMessage("Testing connection to LLM provider...");
 
     try {
-      const headers = buildBYOKHeaders(config);
+      const headers = buildBYOKHeaders({ ...config, isConfigured: true });
       // Quick test using the backend analyze snippet endpoint
       const res = await fetch("/api/analyze", {
         method: "POST",
@@ -165,6 +184,19 @@ export function BYOKSettingsModal({
 
         {/* Content */}
         <div className="space-y-5 px-6 py-5 max-h-[75vh] overflow-y-auto">
+          {/* Mandatory AI Provider Setup Notice */}
+          {(!isBYOKConfigured(config) || isMandatory) && (
+            <div className="flex items-start gap-2.5 p-3 rounded-lg border border-amber-500/30 bg-amber-950/20 text-xs text-amber-200">
+              <AlertCircle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold text-amber-300">Setup Mandatory — No Default Applied</p>
+                <p className="text-amber-400/80 mt-0.5 leading-relaxed">
+                  You must configure a valid AI provider and credentials before migrating code. Without configuration, AST transpilation, Critic loops, and type resolution cannot run.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Provider Selection */}
           <div className="space-y-2">
             <label className="text-xs font-semibold uppercase tracking-wider text-neutral-400">

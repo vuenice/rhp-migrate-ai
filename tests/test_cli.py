@@ -378,3 +378,47 @@ class Untyped {
     assert "RHP Migration Summary" in res.stdout
     assert "LLM-assisted functions" in res.stdout
     assert "Estimated token cost" in res.stdout
+
+
+def test_cli_whole_project_stages_ai_only_on_errors(tmp_path: Path):
+    """Whole-project migration runs stages 1, 2, 3 and only triggers AI on errors/warnings."""
+    # 1. Clean file: no errors/warnings -> 0 AI operations
+    clean_file = tmp_path / "CleanModel.php"
+    clean_file.write_text(
+        """<?php
+class CleanModel {
+    public function isValid(): bool {
+        return true;
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    res_clean = runner.invoke(app, [str(clean_file), "--ai", "--model", "mock", "--no-git", "--no-cache"])
+    assert res_clean.exit_code == 0
+    assert "Stage 1: Deterministic 'rhp migrate'" in res_clean.stdout
+    assert "Stage 2: Whole-Project Linting" in res_clean.stdout
+    assert "Stage 3: Whole-Project Build" in res_clean.stdout
+    assert "LLM-assisted functions" in res_clean.stdout
+    assert "0" in res_clean.stdout
+
+    # 2. File with errors/warnings -> AI triggers specifically to heal that use case
+    broken_file = tmp_path / "BrokenModel.php"
+    broken_file.write_text(
+        """<?php
+class BrokenModel {
+    public function compute($untypedParam) {
+        return $untypedParam * 2;
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    res_broken = runner.invoke(app, [str(broken_file), "--ai", "--model", "mock", "--no-git", "--no-cache"])
+    assert res_broken.exit_code == 0
+    assert "Stage 1: Deterministic 'rhp migrate'" in res_broken.stdout
+    assert "Stage 2: Whole-Project Linting" in res_broken.stdout
+    assert "Stage 3: Whole-Project Build" in res_broken.stdout
+    assert "LLM-assisted functions" in res_broken.stdout

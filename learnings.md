@@ -90,8 +90,18 @@ When appending new learnings, follow this format:
   - Implement a Python 3.12 stage using `uv` with compiler prerequisites (`build-essential`, `gcc`, `git`, `curl`), packaging the RHP CLI check tool at `/usr/local/bin/rhp`.
   - Add `docker-entrypoint.sh` to automatically seed `/data/learnings.md` and `/data/rules/` if empty on first volume mount.
   - Support configurable CORS origins via `CORS_ORIGINS`, persistent volume paths via `RHP_LEARNINGS_PATH` / `RHP_RULES_DIR`, and optional offline air-gapped migrations via Docker Compose `--profile local-llm` running Ollama.
-- **Verification**: Verified via `npm run build` (standalone output created) and `pytest` (all 220 tests passing).
-- **Key Heuristic**: In production container environments, use Next.js standalone output to reduce image footprint; seed persistent volumes via container entrypoint scripts so initial system memory is never blank.
+### [2026-11-24] Whole-Project 3-Stage Migration Pipeline Architecture
+- **Context / Symptom**: Eager file-by-file AI migration was executing unnecessary LLM calls across all files indiscriminately, resulting in high latency, high token cost, and redundant edits on code that deterministic tools could handle.
+- **Root Cause**: The migration loop processed each file sequentially through all AI stages without first letting the whole-project CLI tools (`rhp migrate`, `rhp lint`, `rhp build`) execute deterministically across the entire codebase.
+- **Working Solution**:
+  - Re-architected migration into 3 project-wide stages:
+    1. **Stage 1 (`rhp migrate`)**: Whole-project deterministic migration first. Collect errors and warnings; trigger AI *only* on files/units that produced errors/warnings to diagnose and resolve why the migration command was unsuccessful.
+    2. **Stage 2 (`rhp lint`)**: Whole-project linting. Trigger AI *only* on lint diagnostics to explain and fix why migration did not produce lint-clean code.
+    3. **Stage 3 (`rhp build`)**: Whole-project compilation/build. Trigger AI in a compiler-guided healing loop on build errors to resolve type and contract issues.
+  - Implemented `run_build` in `rhp_cli.py` and supported `build` subcommand in `bin/rhp`.
+  - Clean files with 0 errors/warnings bypass the LLM completely with 0 AI cost.
+- **Verification**: Verified via `test_cli_whole_project_stages_ai_only_on_errors` and full test suite (`pytest`).
+- **Key Heuristic**: Run deterministic CLI tools across the entire project first; treat the AI as an error/warning resolver and root-cause investigator rather than an indiscriminate whole-codebase rewriter.
 
 ---
 

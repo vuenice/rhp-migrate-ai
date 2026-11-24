@@ -16,9 +16,13 @@ from rhp_migrate.engine.rhp_cli import (
     MigrateReport,
     RhpCli,
     RhpExecutionError,
+    RhpManifestNotFoundError,
     RhpNotFoundError,
+    create_default_rhp_toml,
+    find_project_root,
     find_rhp_binary,
     get_rhp_binary,
+    has_rhp_manifest,
     run_check,
     run_migrate,
 )
@@ -251,6 +255,78 @@ def test_run_migrate_malformed_json(mock_subproc: MagicMock, tmp_path: Path):
     assert "Failed to parse JSON" in str(exc_info.value)
 
 
+@patch("subprocess.run")
+def test_run_migrate_single_file_flag(mock_subproc: MagicMock, tmp_path: Path):
+    """run_migrate uses --file=<path> when migrating an individual file."""
+    fake_bin = tmp_path / "rhp"
+    fake_bin.touch()
+    mock_subproc.return_value = MagicMock(
+        returncode=0,
+        stdout=json.dumps(SAMPLE_MIGRATE_JSON),
+        stderr="",
+    )
+
+    test_file = tmp_path / "UserController.php"
+    test_file.touch()
+
+    # Create rhp.toml at root
+    (tmp_path / "rhp.toml").write_text("[package]\nname = 'test'\n", encoding="utf-8")
+
+    report = run_migrate(test_file, dry_run=True, php_version=7, bin_path=fake_bin)
+    assert isinstance(report, MigrateReport)
+
+    mock_subproc.assert_called_once()
+    cmd = mock_subproc.call_args[0][0]
+    assert cmd[1] == "migrate"
+    assert f"--file={test_file}" in cmd
+    assert "--dry-run" in cmd
+
+
+def test_run_migrate_missing_manifest_error(tmp_path: Path):
+    """run_migrate raises RhpManifestNotFoundError when require_manifest=True and rhp.toml is missing."""
+    fake_bin = tmp_path / "rhp"
+    fake_bin.touch()
+
+    test_file = tmp_path / "app" / "Services" / "Payment.php"
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.touch()
+
+    with pytest.raises(RhpManifestNotFoundError) as exc_info:
+        run_migrate(test_file, bin_path=fake_bin, require_manifest=True)
+
+    assert "rhp.toml" in str(exc_info.value)
+    assert "--file" in str(exc_info.value)
+
+
+def test_create_default_rhp_toml(tmp_path: Path):
+    """create_default_rhp_toml generates a valid starter manifest."""
+    # Write a mock composer.json
+    composer = tmp_path / "composer.json"
+    composer.write_text(
+        json.dumps({
+            "name": "vuenice/test-app",
+            "autoload": {
+                "psr-4": {
+                    "App\\": "app/",
+                    "Database\\": "database/"
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    toml_path = create_default_rhp_toml(tmp_path)
+    assert toml_path.is_file()
+    assert has_rhp_manifest(tmp_path) is True
+
+    content = toml_path.read_text(encoding="utf-8")
+    assert 'name = "vuenice/test-app"' in content
+    assert '"App\\\\" = "app/"' in content
+    assert '"Database\\\\" = "database/"' in content
+    assert "[server]" in content
+
+
+
 # ---------------------------------------------------------------------------
 # rhp check Tests
 # ---------------------------------------------------------------------------
@@ -406,6 +482,7 @@ def test_real_rhp_binary_integration(tmp_path: Path):
         "}\n",
         encoding="utf-8",
     )
+    (tmp_path / "rhp.toml").write_text("[package]\nname = 'test'\n", encoding="utf-8")
 
     # Test run_migrate with dry_run=True
     report = run_migrate(test_php, dry_run=True, php_version=7, bin_path=rhp_bin)
@@ -447,4 +524,75 @@ def test_subprocess_real_executable(tmp_path: Path):
     assert check_report.diagnostics[0].code == "RHP0101"
     assert check_report.diagnostics[0].line == 1
     assert check_report.diagnostics[0].column == 1
+
+
+def test_bin_rhp_enforces_project_and_file_semantics(tmp_path: Path):
+    """Test bin/rhp enforces that single file requires --file and rhp.toml."""
+    bin_rhp = Path(__file__).resolve().parent.parent / "bin" / "rhp"
+    if not bin_rhp.is_file():
+        pytest.skip("bin/rhp not found")
+
+    test_php = tmp_path / "app" / "index.php"
+    test_php.parent.mkdir(parents=True, exist_ok=True)
+    test_php.write_text("<?php echo 'hi';", encoding="utf-8")
+
+    # 1. Positional file without --file must fail
+    res_pos = subprocess.run(
+        [str(bin_rhp), "migrate", str(test_php)],
+        capture_output=True,
+        text=True,
+    )
+    assert res_pos.returncode == 1
+    assert "only runs on a project" in res_pos.stderr
+    assert "--file=" in res_pos.stderr
+
+    # 2. --file without rhp.toml must fail
+    res_no_toml = subprocess.run(
+        [str(bin_rhp), "migrate", f"--file={test_php}"],
+        capture_output=True,
+        text=True,
+    )
+    assert res_no_toml.returncode == 1
+    assert "rhp.toml" in res_no_toml.stderr
+
+    # 3. --file with rhp.toml must succeed
+    (tmp_path / "rhp.toml").write_text("[package]\nname = 'test'\n", encoding="utf-8")
+    res_ok = subprocess.run(
+        [str(bin_rhp), "migrate", f"--file={test_php}", "--format=json"],
+        capture_output=True,
+        text=True,
+    )
+    assert res_ok.returncode == 0
+    data = json.loads(res_ok.stdout)
+    assert data["files_scanned"] == 1
+
+
+def test_rhp_cli_build_command(tmp_path: Path):
+    """Test run_build and RhpCli.build integration with bin/rhp."""
+    bin_rhp = Path(__file__).resolve().parent.parent / "bin" / "rhp"
+    if not bin_rhp.is_file():
+        pytest.skip("bin/rhp not found")
+
+    from rhp_migrate.engine.rhp_cli import BuildReport, run_build
+
+    # 1. Clean file build passes
+    clean_file = tmp_path / "Clean.rhp"
+    clean_file.write_text("class Clean { public int $id; }\n", encoding="utf-8")
+    report = run_build(clean_file, bin_path=bin_rhp)
+    assert isinstance(report, BuildReport)
+    assert report.has_errors is False
+
+    # 2. Syntax defect build returns errors
+    broken_file = tmp_path / "Broken.rhp"
+    broken_file.write_text("class Broken { public int $id = ; }\n", encoding="utf-8")
+    err_report = run_build(broken_file, bin_path=bin_rhp)
+    assert err_report.has_errors is True
+    assert len(err_report.diagnostics) > 0
+
+    # 3. RhpCli object wrapper build method
+    cli = RhpCli(bin_path=bin_rhp)
+    cli_report = cli.build(clean_file)
+    assert isinstance(cli_report, BuildReport)
+    assert cli_report.has_errors is False
+
 

@@ -392,3 +392,131 @@ class WorkspaceCleanupResponse(BaseModel):
     cleaned_count: int = Field(..., description="Number of expired workspaces deleted")
     message: str = Field(..., description="Status message")
 
+
+class ManifestStatusResponse(BaseModel):
+    """Response schema for workspace manifest status (rhp.toml)."""
+    model_config = ConfigDict(extra="ignore")
+
+    workspace_id: str = Field(..., description="Unique workspace identifier")
+    has_manifest: bool = Field(..., description="Whether rhp.toml exists at workspace root")
+    manifest_path: str = Field(..., description="Filesystem path to rhp.toml")
+    content: Optional[str] = Field(None, description="Content of rhp.toml if present")
+    package_name: Optional[str] = Field(None, description="Package name declared or detected")
+    psr4: dict[str, str] = Field(default_factory=dict, description="PSR-4 namespace mappings")
+
+
+class WorkspaceSaveFileRequest(BaseModel):
+    """Request payload to write updated code to workspace."""
+    model_config = ConfigDict(extra="ignore")
+
+    path: str = Field(..., description="Relative path of the file to save")
+    content: str = Field(..., description="Updated file content to write")
+    status: Optional[str] = Field("migrated", description="Status to record for this file: 'migrated', 'needs_review', etc.")
+    is_rhp: bool = Field(False, description="Whether this is or should also generate a .rhp file")
+
+
+class WorkspaceSaveFileResponse(BaseModel):
+    """Response confirming file write to workspace."""
+    model_config = ConfigDict(extra="ignore")
+
+    success: bool
+    path: str
+    rhp_path: Optional[str] = None
+    size: int
+    message: str
+
+
+class WorkspaceStateSaveRequest(BaseModel):
+    """Payload to persist workspace migration state across sessions."""
+    model_config = ConfigDict(extra="ignore")
+
+    active_file: Optional[str] = None
+    migrated_files: dict[str, str] = Field(default_factory=dict)
+    file_statuses: dict[str, str] = Field(default_factory=dict)
+    scorecards: dict[str, Any] = Field(default_factory=dict)
+    compiler_logs: list[dict[str, Any]] = Field(default_factory=list)
+    chat_messages: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class WorkspaceStateResponse(BaseModel):
+    """Full saved state for a workspace to restore open projects."""
+    model_config = ConfigDict(extra="ignore")
+
+    workspace_id: str
+    active_file: Optional[str] = None
+    migrated_files: dict[str, str] = Field(default_factory=dict)
+    file_statuses: dict[str, str] = Field(default_factory=dict)
+    scorecards: dict[str, Any] = Field(default_factory=dict)
+    compiler_logs: list[dict[str, Any]] = Field(default_factory=list)
+    chat_messages: list[dict[str, Any]] = Field(default_factory=list)
+    csv_path: Optional[str] = None
+    completed_count: int = 0
+    needs_review_count: int = 0
+    pending_count: int = 0
+    last_updated: Optional[str] = None
+
+
+class LastSessionResponse(BaseModel):
+    """Last opened project session information."""
+    model_config = ConfigDict(extra="ignore")
+
+    workspace_id: Optional[str] = None
+    workspace_path: Optional[str] = None
+    project_name: Optional[str] = None
+    last_opened_at: Optional[str] = None
+    file_count: int = 0
+
+
+class CsvStatusSummary(BaseModel):
+    """Summary counts for files in CSV."""
+    model_config = ConfigDict(extra="ignore")
+
+    total_files: int = 0
+    completed_count: int = 0
+    needs_review_count: int = 0
+    pending_count: int = 0
+
+
+class CsvStatusResponse(BaseModel):
+    """Response for CSV status file content and stats."""
+    model_config = ConfigDict(extra="ignore")
+
+    workspace_id: str
+    csv_path: str
+    csv_content: str
+    summary: CsvStatusSummary
+
+
+class SoftwareInfoResponse(BaseModel):
+    """Software directory information (like VSCode / Antigravity app directories)."""
+    model_config = ConfigDict(extra="ignore")
+
+    software_dir: str
+    projects_dir: str
+    platform: str
+    description: str
+
+
+class ProjectSummaryItem(BaseModel):
+    """Summary of a saved project."""
+    model_config = ConfigDict(extra="ignore")
+
+    workspace_id: str
+    project_name: str
+    workspace_path: str
+    created_at: Optional[float] = None
+    last_opened_at: Optional[float] = None
+    file_count: int = 0
+    completed_count: int = 0
+    needs_review_count: int = 0
+
+
+class ProjectListResponse(BaseModel):
+    """List of all projects kept in the software directory."""
+    model_config = ConfigDict(extra="ignore")
+
+    projects: list[ProjectSummaryItem] = Field(default_factory=list)
+    total_projects: int = 0
+
+
+

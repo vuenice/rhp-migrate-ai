@@ -22,6 +22,8 @@ import shutil
 import subprocess
 import time
 from typing import Any, Optional, Sequence, Union
+import csv
+import sys
 import urllib.parse
 import uuid
 import zipfile
@@ -29,26 +31,39 @@ import zipfile
 from fastapi import APIRouter, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import PlainTextResponse
 
+from rhp_migrate.engine import create_default_rhp_toml, has_rhp_manifest
 from rhp_migrate.server.models import (
     CloneGithubRequest,
+    CsvStatusResponse,
+    CsvStatusSummary,
     FileTreeNode,
+    LastSessionResponse,
+    ManifestStatusResponse,
+    ProjectListResponse,
+    ProjectSummaryItem,
+    SoftwareInfoResponse,
     WorkspaceCleanupResponse,
     WorkspaceFileContentResponse,
     WorkspaceResponse,
+    WorkspaceSaveFileRequest,
+    WorkspaceSaveFileResponse,
+    WorkspaceStateResponse,
+    WorkspaceStateSaveRequest,
     WorkspaceTreeResponse,
 )
 
 logger = logging.getLogger(__name__)
 
 # Default base directory for sandboxed workspaces
-DEFAULT_WORKSPACES_ROOT = Path("/tmp/rhp_workspaces")
+DEFAULT_WORKSPACES_ROOT = None
 
 # Default TTL: 2 hours (in seconds)
 WORKSPACE_TTL_SECONDS = 7200
 
 # Directories and files to exclude from tree navigation
 IGNORED_DIRS = {"vendor", "node_modules", ".git"}
-IGNORED_FILES = {".env", ".workspace_meta.json"}
+IGNORED_FILES = {".env", ".workspace_meta.json", ".migration_state.json", "migration_status.csv"}
+
 
 
 # Allowed pattern for workspace IDs to prevent traversal in path parameters
@@ -65,18 +80,82 @@ class GitCloneError(Exception):
     pass
 
 
+def get_software_data_dir() -> Path:
+    """Return the persistent software directory for rhp-migrate.
+
+    Following conventions of desktop/CLI tools like VSCode (~/.config/Code on Linux,
+    %APPDATA%/Code on Windows) and Antigravity (~/.gemini/antigravity).
+    Configurable via the RHP_APP_DIR environment variable.
+    """
+    env_dir = os.environ.get("RHP_APP_DIR")
+    if env_dir:
+        try:
+            root = Path(env_dir).resolve()
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "projects").mkdir(parents=True, exist_ok=True)
+            return root
+        except Exception:
+            pass
+
+    # If RHP_WORKSPACES_DIR is set (e.g. in tests), co-locate app data there
+    ws_env = os.environ.get("RHP_WORKSPACES_DIR")
+    if ws_env:
+        try:
+            root = Path(ws_env).resolve().parent / ".rhp-software-data"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "projects").mkdir(parents=True, exist_ok=True)
+            return root
+        except Exception:
+            pass
+
+    candidate_paths: list[Path] = []
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidate_paths.append(Path(appdata) / "rhp-migrate")
+        candidate_paths.append(Path.home() / ".rhp-migrate")
+    else:
+        xdg_data = os.environ.get("XDG_DATA_HOME")
+        if xdg_data:
+            candidate_paths.append(Path(xdg_data) / "rhp-migrate")
+        candidate_paths.append(Path.home() / ".rhp-migrate")
+
+    # Local fallback within project workspace or tmp if home is read-only
+    candidate_paths.append(Path.cwd() / ".rhp-data")
+    candidate_paths.append(Path("/tmp/rhp-migrate"))
+
+    for p in candidate_paths:
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            test_file = p / ".test_write"
+            test_file.write_text("ok", encoding="utf-8")
+            test_file.unlink(missing_ok=True)
+            (p / "projects").mkdir(parents=True, exist_ok=True)
+            return p
+        except Exception:
+            continue
+
+    fallback = Path("/tmp/rhp-migrate")
+    fallback.mkdir(parents=True, exist_ok=True)
+    (fallback / "projects").mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
+
 def get_workspaces_root() -> Path:
-    """Return the base directory for sandboxed workspaces.
+    """Return the base directory for project workspaces.
 
     Configurable via the RHP_WORKSPACES_DIR environment variable.
+    Defaults to the persistent 'projects' folder inside the software data directory.
     """
     env_dir = os.environ.get("RHP_WORKSPACES_DIR")
     if env_dir:
         root = Path(env_dir).resolve()
     else:
-        root = DEFAULT_WORKSPACES_ROOT.resolve()
+        root = get_software_data_dir() / "projects"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
 
 
 def classify_php_file(file_path: Union[str, Path], content: Optional[str] = None) -> Optional[str]:
@@ -482,21 +561,433 @@ async def periodic_workspace_cleanup_task(
             await asyncio.sleep(interval_seconds)
 
 
+def record_last_session(workspace_id: str, ws_dir: Path, project_name: Optional[str] = None) -> None:
+    """Record the last opened workspace in the persistent software directory."""
+    software_dir = get_software_data_dir()
+    session_file = software_dir / "last_session.json"
+    resolved_name = project_name
+    if not resolved_name:
+        meta_file = ws_dir / ".workspace_meta.json"
+        if meta_file.is_file():
+            try:
+                mdata = json.loads(meta_file.read_text(encoding="utf-8"))
+                resolved_name = mdata.get("name") or mdata.get("repo_url")
+            except Exception:
+                pass
+    if not resolved_name:
+        resolved_name = ws_dir.name
+
+    file_count = 0
+    try:
+        _, file_count = build_file_tree(ws_dir)
+    except Exception:
+        pass
+
+    session_data = {
+        "workspace_id": workspace_id,
+        "workspace_path": str(ws_dir),
+        "project_name": resolved_name,
+        "last_opened_at": datetime.now(timezone.utc).isoformat(),
+        "file_count": file_count,
+    }
+    try:
+        session_file.write_text(json.dumps(session_data, indent=2), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Failed to record last session: %s", exc)
+
+
+def get_last_session() -> LastSessionResponse:
+    """Retrieve last opened workspace information."""
+    software_dir = get_software_data_dir()
+    session_file = software_dir / "last_session.json"
+    if session_file.is_file():
+        try:
+            data = json.loads(session_file.read_text(encoding="utf-8"))
+            wid = data.get("workspace_id")
+            wpath_str = data.get("workspace_path", "")
+            wpath = Path(wpath_str) if wpath_str else None
+            if wid and wpath and wpath.is_dir():
+                return LastSessionResponse(
+                    workspace_id=wid,
+                    workspace_path=str(wpath),
+                    project_name=data.get("project_name", wid),
+                    last_opened_at=data.get("last_opened_at"),
+                    file_count=data.get("file_count", 0),
+                )
+        except Exception as exc:
+            logger.warning("Failed to read last session: %s", exc)
+    return LastSessionResponse(workspace_id=None)
+
+
+def generate_workspace_csv(ws_dir: Path) -> tuple[Path, str, CsvStatusSummary]:
+    """Generate or update migration_status.csv containing all project file information.
+
+    Records:
+    - file_path
+    - file_name
+    - classification
+    - status ('completed', 'needs_review', 'pending')
+    - needs_review ('Yes' / 'No')
+    - review_reason
+    - readiness_percentage
+    - unsupported_features
+    - untyped_params
+    - rhp_file_path
+    - last_updated
+    """
+    csv_path = ws_dir / "migration_status.csv"
+    state_file = ws_dir / ".migration_state.json"
+    state: dict[str, Any] = {}
+    if state_file.is_file():
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    migrated_files: dict[str, str] = state.get("migrated_files", {})
+    file_statuses: dict[str, str] = state.get("file_statuses", {})
+    scorecards: dict[str, Any] = state.get("scorecards", {})
+
+    rows: list[list[str]] = []
+    headers = [
+        "file_path",
+        "file_name",
+        "classification",
+        "status",
+        "needs_review",
+        "review_reason",
+        "readiness_percentage",
+        "unsupported_features",
+        "untyped_params",
+        "rhp_file_path",
+        "last_updated",
+    ]
+
+    total_files = 0
+    completed_count = 0
+    needs_review_count = 0
+    pending_count = 0
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for root, dirs, files in os.walk(ws_dir):
+        dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
+        for f in sorted(files):
+            if f in IGNORED_FILES or f.startswith(".env.") or f == "migration_status.csv":
+                continue
+
+            full_path = Path(root) / f
+            try:
+                rel_path = str(full_path.relative_to(ws_dir)).replace("\\", "/")
+            except ValueError:
+                continue
+
+            # Skip standalone .rhp if companion to .php exists
+            if rel_path.endswith(".rhp"):
+                php_counterpart = ws_dir / (rel_path[:-4] + ".php")
+                if php_counterpart.is_file():
+                    continue
+
+            total_files += 1
+            classification = classify_php_file(full_path) or "Source"
+
+            recorded_status = file_statuses.get(rel_path, "")
+            is_migrated_in_state = rel_path in migrated_files or recorded_status == "migrated"
+            rhp_companion = ws_dir / (rel_path[:-4] + ".rhp") if rel_path.endswith(".php") else None
+            has_rhp = (rhp_companion and rhp_companion.is_file()) or rel_path.endswith(".rhp")
+
+            file_code = migrated_files.get(rel_path, "")
+            if not file_code and full_path.is_file():
+                try:
+                    file_code = full_path.read_text(encoding="utf-8", errors="replace")[:4096]
+                except Exception:
+                    file_code = ""
+
+            scorecard_data = scorecards.get(rel_path, {})
+            readiness = scorecard_data.get("readinessPercentage", "")
+            unsupported = scorecard_data.get("unsupportedCount", 0)
+            untyped = scorecard_data.get("untypedParamCount", 0)
+
+            has_todos = "TODO_RHP_TYPE" in file_code or "needs_human_review" in file_code
+
+            if recorded_status == "needs_review" or (has_todos and is_migrated_in_state) or recorded_status == "warning":
+                status_str = "needs_review"
+                needs_review_str = "Yes"
+                review_reason = "Contains unresolved type annotations or compiler warnings" if has_todos else "Manual review flagged"
+                needs_review_count += 1
+            elif is_migrated_in_state or has_rhp or recorded_status == "migrated":
+                status_str = "completed"
+                needs_review_str = "No"
+                review_reason = "Migration complete & verified"
+                completed_count += 1
+                if not readiness:
+                    readiness = "100"
+            else:
+                status_str = "pending"
+                needs_review_str = "No"
+                review_reason = "Pending migration"
+                pending_count += 1
+
+            rhp_rel = str(rhp_companion.relative_to(ws_dir)).replace("\\", "/") if (rhp_companion and rhp_companion.is_file()) else ""
+
+            rows.append([
+                rel_path,
+                f,
+                classification,
+                status_str,
+                needs_review_str,
+                review_reason,
+                f"{readiness}%" if readiness != "" else "N/A",
+                str(unsupported),
+                str(untyped),
+                rhp_rel,
+                now_iso,
+            ])
+
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(headers)
+    writer.writerows(rows)
+    csv_content = buf.getvalue()
+
+    csv_path.write_text(csv_content, encoding="utf-8")
+    summary = CsvStatusSummary(
+        total_files=total_files,
+        completed_count=completed_count,
+        needs_review_count=needs_review_count,
+        pending_count=pending_count,
+    )
+    return csv_path, csv_content, summary
+
+
+def seed_demo_workspace(demo_dir: Path) -> None:
+    """Seed the demo workspace in the persistent software projects directory."""
+    demo_dir.mkdir(parents=True, exist_ok=True)
+    services_dir = demo_dir / "app" / "Services"
+    models_dir = demo_dir / "app" / "Models"
+    services_dir.mkdir(parents=True, exist_ok=True)
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. PaymentService.php
+    (services_dir / "PaymentService.php").write_text("""<?php
+
+namespace App\\Services;
+
+use App\\Models\\Order;
+use Illuminate\\Support\\Facades\\Http;
+
+class PaymentService
+{
+    private string $gatewayUrl;
+    private $logger; // Untyped property
+
+    public function __construct(string $gatewayUrl, $logger = null)
+    {
+        $this->gatewayUrl = $gatewayUrl;
+        $this->logger = $logger;
+    }
+
+    /**
+     * Process customer order charge
+     */
+    public function charge(Order $order, $amount, array $options = []): array
+    {
+        // Dynamic associative array in PHP
+        $payload = [
+            'order_id' => $order->id,
+            'amount' => (int) ($amount * 100),
+            'currency' => $options['currency'] ?? 'USD',
+            'metadata' => $options['metadata'] ?? [],
+        ];
+
+        $response = Http::timeout(10)->post($this->gatewayUrl . '/v1/charges', $payload);
+
+        if (!$response->successful()) {
+            throw new \\RuntimeException("Charge failed: " . $response->body());
+        }
+
+        return $response->json();
+    }
+}
+""", encoding="utf-8")
+
+    # 2. TaxCalculator.php
+    (services_dir / "TaxCalculator.php").write_text("""<?php
+
+namespace App\\Services;
+
+class TaxCalculator
+{
+    public function calculate(float $subtotal, float $taxRate): float
+    {
+        return $subtotal * $taxRate;
+    }
+}
+""", encoding="utf-8")
+
+    # 3. Order.php
+    (models_dir / "Order.php").write_text("""<?php
+
+namespace App\\Models;
+
+use Illuminate\\Database\\Eloquent\\Model;
+
+class Order extends Model
+{
+    protected $table = 'orders';
+    protected $fillable = ['id', 'user_id', 'total_cents', 'status'];
+
+    public function getFormattedTotal(): string
+    {
+        return sprintf("$%.2f", $this->total_cents / 100);
+    }
+}
+""", encoding="utf-8")
+
+    # 4. User.php
+    (models_dir / "User.php").write_text("""<?php
+
+namespace App\\Models;
+
+use Illuminate\\Database\\Eloquent\\Model;
+
+class User extends Model
+{
+    protected $table = 'users';
+    protected $fillable = ['id', 'name', 'email'];
+
+    public function getDisplayName(): string
+    {
+        return $this->name . ' <' . $this->email . '>';
+    }
+}
+""", encoding="utf-8")
+
+    # 5. rhp.toml
+    (demo_dir / "rhp.toml").write_text("""[package]
+name = "rhp-demo-project"
+version = "0.1.0"
+edition = "2026"
+
+[dependencies]
+rhp-stdlib = "0.1"
+
+[target.strict]
+type_shapes = true
+null_safety = true
+array_specialization = true
+""", encoding="utf-8")
+
+    # 6. .workspace_meta.json
+    meta = {
+        "workspace_id": "demo",
+        "name": "Demo E-Commerce Service",
+        "created_at": time.time(),
+        "created_iso": datetime.now(timezone.utc).isoformat(),
+    }
+    (demo_dir / ".workspace_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    # 7. Initial .migration_state.json
+    state = {
+        "workspace_id": "demo",
+        "active_file": "app/Services/PaymentService.php",
+        "migrated_files": {
+            "app/Services/TaxCalculator.php": """<?rhp
+namespace App\\Services;
+
+final class TaxCalculator
+{
+    public function calculate(float $subtotal, float $taxRate): float
+    {
+        return $subtotal * $taxRate;
+    }
+}
+""",
+            "app/Models/User.php": """<?rhp
+namespace App\\Models;
+
+final class User
+{
+    public int $id;
+    public string $name;
+    public string $email;
+
+    public function getDisplayName(): string
+    {
+        return $this->name . ' <' . $this->email . '>';
+    }
+}
+""",
+        },
+        "file_statuses": {
+            "app/Services/PaymentService.php": "warning",
+            "app/Services/TaxCalculator.php": "migrated",
+            "app/Models/Order.php": "pending",
+            "app/Models/User.php": "migrated",
+        },
+        "scorecards": {
+            "app/Services/PaymentService.php": {
+                "readinessPercentage": 74,
+                "unsupportedCount": 1,
+                "untypedParamCount": 2,
+                "isMigrationReady": False,
+                "classes": ["PaymentService"],
+                "functions": ["__construct", "charge"],
+            },
+            "app/Services/TaxCalculator.php": {
+                "readinessPercentage": 100,
+                "unsupportedCount": 0,
+                "untypedParamCount": 0,
+                "isMigrationReady": True,
+                "classes": ["TaxCalculator"],
+                "functions": ["calculate"],
+            },
+        },
+        "compiler_logs": [
+            {
+                "id": "1",
+                "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                "level": "info",
+                "message": "RHP Language Engine initialized in software workspace.",
+            },
+            {
+                "id": "2",
+                "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                "level": "warn",
+                "message": "Untyped parameters detected in PaymentService::charge(). Manual hint recommended.",
+            },
+        ],
+        "chat_messages": [
+            {
+                "id": "m1",
+                "role": "assistant",
+                "content": "Welcome to the RHP Migration Workbench! I have inspected PaymentService.php. It has an AST readiness score of 74%. You can instruct me to specialize arrays or convert types using the chat below.",
+                "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            }
+        ],
+    }
+    (demo_dir / ".migration_state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+    generate_workspace_csv(demo_dir)
+
+
 class WorkspaceManager:
     """Manages creation, navigation, and lifecycle for sandboxed project workspaces."""
 
     def __init__(self, base_dir: Optional[Path] = None) -> None:
-        self.base_dir = (base_dir or get_workspaces_root()).resolve()
-        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self._custom_base_dir = base_dir.resolve() if base_dir else None
+
+    @property
+    def base_dir(self) -> Path:
+        if self._custom_base_dir:
+            return self._custom_base_dir.resolve()
+        return get_workspaces_root()
+
+    @base_dir.setter
+    def base_dir(self, value: Path) -> None:
+        self._custom_base_dir = value.resolve() if value else None
 
     def create_workspace(self, workspace_id: Optional[str] = None) -> tuple[str, Path]:
         """Create a new unique workspace directory and record metadata."""
-        # Opportunistic cleanup of stale workspaces
-        try:
-            cleanup_old_workspaces(self.base_dir)
-        except Exception:
-            pass
-
         wid = workspace_id or uuid.uuid4().hex
         if not WORKSPACE_ID_PATTERN.match(wid):
             raise ValueError(f"Invalid workspace ID format: '{wid}'")
@@ -514,6 +1005,7 @@ class WorkspaceManager:
             "created_iso": datetime.now(timezone.utc).isoformat(),
         }
         (target / ".workspace_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        record_last_session(wid, target)
 
         return wid, target
 
@@ -532,6 +1024,10 @@ class WorkspaceManager:
                 detail="Directory traversal detected in workspace ID",
             )
 
+        # Auto-seed demo workspace if accessed
+        if workspace_id == "demo" and not ws_dir.is_dir():
+            seed_demo_workspace(ws_dir)
+
         if not ws_dir.is_dir():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -547,7 +1043,10 @@ class WorkspaceManager:
     ) -> list[str]:
         """Unpack a zip file into a workspace with safety checks."""
         ws_dir = self.get_workspace_path(workspace_id)
-        return validate_and_extract_zip(zip_source, ws_dir)
+        files = validate_and_extract_zip(zip_source, ws_dir)
+        generate_workspace_csv(ws_dir)
+        record_last_session(workspace_id, ws_dir)
+        return files
 
     def clone_repository(
         self,
@@ -564,7 +1063,6 @@ class WorkspaceManager:
             branch=branch,
             github_token=github_token,
         )
-        # Update metadata timestamp after clone
         meta_file = ws_dir / ".workspace_meta.json"
         meta = {
             "workspace_id": workspace_id,
@@ -573,11 +1071,18 @@ class WorkspaceManager:
             "branch": branch,
         }
         meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        generate_workspace_csv(ws_dir)
+        record_last_session(workspace_id, ws_dir)
 
     def get_tree(self, workspace_id: str) -> WorkspaceTreeResponse:
         """Generate the filtered file tree for the workspace."""
         ws_dir = self.get_workspace_path(workspace_id)
         tree, total_files = build_file_tree(ws_dir)
+        try:
+            generate_workspace_csv(ws_dir)
+        except Exception:
+            pass
+        record_last_session(workspace_id, ws_dir)
         return WorkspaceTreeResponse(
             workspace_id=workspace_id,
             total_files=total_files,
@@ -632,6 +1137,201 @@ class WorkspaceManager:
             classification=classification,
         )
 
+    def save_file(
+        self,
+        workspace_id: str,
+        rel_path: str,
+        content: str,
+        status: Optional[str] = "migrated",
+        is_rhp: bool = False,
+    ) -> tuple[Path, Optional[Path], int]:
+        """Save updated file content into workspace sandbox and generate/update .rhp companion."""
+        ws_dir = self.get_workspace_path(workspace_id)
+        clean_path = rel_path.lstrip("/\\")
+        if ".." in Path(clean_path).parts:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid path: directory traversal attempt",
+            )
+        target = (ws_dir / clean_path).resolve()
+        if not target.is_relative_to(ws_dir):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid path: escapes workspace sandbox",
+            )
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+        # Companion RHP write
+        rhp_target: Optional[Path] = None
+        if clean_path.endswith(".php") or is_rhp:
+            rhp_rel = clean_path if clean_path.endswith(".rhp") else (clean_path[:-4] + ".rhp")
+            rhp_target = (ws_dir / rhp_rel).resolve()
+            if rhp_target.is_relative_to(ws_dir):
+                rhp_target.parent.mkdir(parents=True, exist_ok=True)
+                rhp_target.write_text(content, encoding="utf-8")
+
+        # Update .migration_state.json
+        state_file = ws_dir / ".migration_state.json"
+        current_state: dict[str, Any] = {}
+        if state_file.is_file():
+            try:
+                current_state = json.loads(state_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        current_state.setdefault("migrated_files", {})[clean_path] = content
+        if status:
+            current_state.setdefault("file_statuses", {})[clean_path] = status
+        current_state["last_updated"] = datetime.now(timezone.utc).isoformat()
+        state_file.write_text(json.dumps(current_state, indent=2), encoding="utf-8")
+
+        generate_workspace_csv(ws_dir)
+        record_last_session(workspace_id, ws_dir)
+
+        return target, rhp_target, len(content.encode("utf-8"))
+
+    def get_state(self, workspace_id: str) -> dict[str, Any]:
+        """Load saved migration state, ensuring CSV exists and recording session."""
+        ws_dir = self.get_workspace_path(workspace_id)
+        state_file = ws_dir / ".migration_state.json"
+        state: dict[str, Any] = {
+            "workspace_id": workspace_id,
+            "active_file": None,
+            "migrated_files": {},
+            "file_statuses": {},
+            "scorecards": {},
+            "compiler_logs": [],
+            "chat_messages": [],
+        }
+        if state_file.is_file():
+            try:
+                loaded = json.loads(state_file.read_text(encoding="utf-8"))
+                state.update(loaded)
+            except Exception as exc:
+                logger.warning("Error parsing state file: %s", exc)
+
+        csv_path, _, summary = generate_workspace_csv(ws_dir)
+        record_last_session(workspace_id, ws_dir)
+
+        return {
+            "workspace_id": workspace_id,
+            "active_file": state.get("active_file"),
+            "migrated_files": state.get("migrated_files", {}),
+            "file_statuses": state.get("file_statuses", {}),
+            "scorecards": state.get("scorecards", {}),
+            "compiler_logs": state.get("compiler_logs", []),
+            "chat_messages": state.get("chat_messages", []),
+            "csv_path": str(csv_path),
+            "completed_count": summary.completed_count,
+            "needs_review_count": summary.needs_review_count,
+            "pending_count": summary.pending_count,
+            "last_updated": state.get("last_updated"),
+        }
+
+    def save_state(self, workspace_id: str, state_req: WorkspaceStateSaveRequest) -> dict[str, Any]:
+        """Save migration state, regenerate CSV, and record session."""
+        ws_dir = self.get_workspace_path(workspace_id)
+        state_file = ws_dir / ".migration_state.json"
+        current_state: dict[str, Any] = {}
+        if state_file.is_file():
+            try:
+                current_state = json.loads(state_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        if state_req.active_file is not None:
+            current_state["active_file"] = state_req.active_file
+        if state_req.migrated_files:
+            current_state.setdefault("migrated_files", {}).update(state_req.migrated_files)
+        if state_req.file_statuses:
+            current_state.setdefault("file_statuses", {}).update(state_req.file_statuses)
+        if state_req.scorecards:
+            current_state.setdefault("scorecards", {}).update(state_req.scorecards)
+        if state_req.compiler_logs is not None:
+            current_state["compiler_logs"] = state_req.compiler_logs
+        if state_req.chat_messages is not None:
+            current_state["chat_messages"] = state_req.chat_messages
+
+        current_state["last_updated"] = datetime.now(timezone.utc).isoformat()
+        state_file.write_text(json.dumps(current_state, indent=2), encoding="utf-8")
+
+        csv_path, _, summary = generate_workspace_csv(ws_dir)
+        record_last_session(workspace_id, ws_dir)
+
+        return {
+            "workspace_id": workspace_id,
+            "active_file": current_state.get("active_file"),
+            "migrated_files": current_state.get("migrated_files", {}),
+            "file_statuses": current_state.get("file_statuses", {}),
+            "scorecards": current_state.get("scorecards", {}),
+            "compiler_logs": current_state.get("compiler_logs", []),
+            "chat_messages": current_state.get("chat_messages", []),
+            "csv_path": str(csv_path),
+            "completed_count": summary.completed_count,
+            "needs_review_count": summary.needs_review_count,
+            "pending_count": summary.pending_count,
+            "last_updated": current_state.get("last_updated"),
+        }
+
+    def list_all_projects(self) -> list[ProjectSummaryItem]:
+        """List all projects kept in the persistent software directory."""
+        projects: list[ProjectSummaryItem] = []
+        if not self.base_dir.is_dir():
+            return projects
+
+        for item in sorted(self.base_dir.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
+            if not item.is_dir():
+                continue
+            wid = item.name
+            meta_file = item / ".workspace_meta.json"
+            name = wid
+            created_at = None
+            if meta_file.is_file():
+                try:
+                    mdata = json.loads(meta_file.read_text(encoding="utf-8"))
+                    name = mdata.get("name") or mdata.get("repo_url") or wid
+                    created_at = mdata.get("created_at")
+                except Exception:
+                    pass
+
+            csv_path = item / "migration_status.csv"
+            completed = 0
+            needs_review = 0
+            file_count = 0
+            if csv_path.is_file():
+                try:
+                    with open(csv_path, mode="r", encoding="utf-8") as f:
+                        reader = csv.DictReader(f)
+                        for r in reader:
+                            file_count += 1
+                            st = r.get("status", "")
+                            if st == "completed":
+                                completed += 1
+                            elif st == "needs_review":
+                                needs_review += 1
+                except Exception:
+                    pass
+            else:
+                try:
+                    _, file_count = build_file_tree(item)
+                except Exception:
+                    pass
+
+            projects.append(
+                ProjectSummaryItem(
+                    workspace_id=wid,
+                    project_name=name,
+                    workspace_path=str(item),
+                    created_at=created_at,
+                    last_opened_at=item.stat().st_mtime if item.exists() else None,
+                    file_count=file_count,
+                    completed_count=completed,
+                    needs_review_count=needs_review,
+                )
+            )
+        return projects
+
     def delete_workspace(self, workspace_id: str) -> bool:
         """Explicitly delete a workspace directory."""
         ws_dir = self.get_workspace_path(workspace_id)
@@ -641,6 +1341,7 @@ class WorkspaceManager:
 
 # Global default manager instance
 workspace_manager = WorkspaceManager()
+
 
 # ---------------------------------------------------------------------------
 # FastAPI Router Definitions
@@ -854,3 +1555,188 @@ async def delete_workspace_endpoint(
         cleaned_count=1,
         message=f"Workspace '{workspace_id}' deleted successfully.",
     )
+
+
+@router.get("/{workspace_id}/manifest", response_model=ManifestStatusResponse)
+async def get_workspace_manifest_endpoint(workspace_id: str) -> ManifestStatusResponse:
+    """Check if rhp.toml exists at workspace root and inspect its configuration."""
+    ws_dir = workspace_manager.get_workspace_path(workspace_id)
+    manifest_path = ws_dir / "rhp.toml"
+    has_manifest_flag = manifest_path.is_file()
+    content: Optional[str] = None
+    package_name: Optional[str] = None
+    psr4: dict[str, str] = {}
+
+    if has_manifest_flag:
+        content = manifest_path.read_text(encoding="utf-8")
+        for line in content.splitlines():
+            line_str = line.strip()
+            if line_str.startswith("name ="):
+                package_name = line_str.split("=", 1)[1].strip().strip('"\'')
+    else:
+        comp_path = ws_dir / "composer.json"
+        if comp_path.is_file():
+            try:
+                cdata = json.loads(comp_path.read_text(encoding="utf-8"))
+                package_name = cdata.get("name")
+                if "autoload" in cdata and "psr-4" in cdata["autoload"]:
+                    psr4 = cdata["autoload"]["psr-4"]
+            except Exception:
+                pass
+
+    return ManifestStatusResponse(
+        workspace_id=workspace_id,
+        has_manifest=has_manifest_flag,
+        manifest_path=str(manifest_path),
+        content=content,
+        package_name=package_name or ws_dir.name or "app",
+        psr4=psr4,
+    )
+
+
+@router.post("/{workspace_id}/manifest/init", response_model=ManifestStatusResponse)
+async def init_workspace_manifest_endpoint(
+    workspace_id: str,
+    package_name: Optional[str] = Query(None, description="Optional package name override"),
+) -> ManifestStatusResponse:
+    """Initialize a standard starter rhp.toml manifest at workspace root."""
+    ws_dir = workspace_manager.get_workspace_path(workspace_id)
+    manifest_path = create_default_rhp_toml(ws_dir, package_name=package_name)
+    content = manifest_path.read_text(encoding="utf-8")
+
+    resolved_pkg_name = package_name
+    for line in content.splitlines():
+        line_str = line.strip()
+        if line_str.startswith("name ="):
+            resolved_pkg_name = line_str.split("=", 1)[1].strip().strip('"\'')
+
+    return ManifestStatusResponse(
+        workspace_id=workspace_id,
+        has_manifest=True,
+        manifest_path=str(manifest_path),
+        content=content,
+        package_name=resolved_pkg_name or ws_dir.name or "app",
+    )
+
+
+@router.get("/software-info", response_model=SoftwareInfoResponse)
+async def get_software_info_endpoint() -> SoftwareInfoResponse:
+    """Return software directory paths and platform information."""
+    s_dir = get_software_data_dir()
+    p_dir = get_workspaces_root()
+    return SoftwareInfoResponse(
+        software_dir=str(s_dir),
+        projects_dir=str(p_dir),
+        platform=sys.platform,
+        description="Persistent software workspace storage directory for rhp-migrate",
+    )
+
+
+@router.get("/last-opened", response_model=LastSessionResponse)
+async def get_last_opened_endpoint() -> LastSessionResponse:
+    """Return the last opened project workspace information to restore open session."""
+    return get_last_session()
+
+
+@router.post("/last-opened", response_model=LastSessionResponse)
+async def set_last_opened_endpoint(payload: dict[str, str]) -> LastSessionResponse:
+    """Explicitly update the last opened workspace."""
+    wid = payload.get("workspace_id", "")
+    if wid:
+        ws_dir = workspace_manager.get_workspace_path(wid)
+        record_last_session(wid, ws_dir, payload.get("project_name"))
+    return get_last_session()
+
+
+@router.get("/list", response_model=ProjectListResponse)
+async def list_projects_endpoint() -> ProjectListResponse:
+    """Return list of all existing projects saved in the software directory."""
+    projects = workspace_manager.list_all_projects()
+    return ProjectListResponse(projects=projects, total_projects=len(projects))
+
+
+@router.get("/{workspace_id}/state", response_model=WorkspaceStateResponse)
+async def get_workspace_state_endpoint(workspace_id: str) -> WorkspaceStateResponse:
+    """Load complete saved migration state for the workspace."""
+    state = workspace_manager.get_state(workspace_id)
+    return WorkspaceStateResponse(**state)
+
+
+@router.post("/{workspace_id}/state", response_model=WorkspaceStateResponse)
+async def save_workspace_state_endpoint(
+    workspace_id: str,
+    req: WorkspaceStateSaveRequest,
+) -> WorkspaceStateResponse:
+    """Persist complete migration state for the workspace."""
+    state = workspace_manager.save_state(workspace_id, req)
+    return WorkspaceStateResponse(**state)
+
+
+@router.post("/{workspace_id}/file", response_model=WorkspaceSaveFileResponse)
+async def save_workspace_file_endpoint(
+    workspace_id: str,
+    req: WorkspaceSaveFileRequest,
+) -> WorkspaceSaveFileResponse:
+    """Save updated/migrated file content to the project directory and regenerate CSV."""
+    target, rhp_target, size = workspace_manager.save_file(
+        workspace_id=workspace_id,
+        rel_path=req.path,
+        content=req.content,
+        status=req.status,
+        is_rhp=req.is_rhp,
+    )
+    ws_dir = workspace_manager.get_workspace_path(workspace_id)
+    rel_path = str(target.relative_to(ws_dir)).replace("\\", "/")
+    rhp_rel = str(rhp_target.relative_to(ws_dir)).replace("\\", "/") if rhp_target else None
+
+    return WorkspaceSaveFileResponse(
+        success=True,
+        path=rel_path,
+        rhp_path=rhp_rel,
+        size=size,
+        message=f"File '{rel_path}' saved successfully to project software directory.",
+    )
+
+
+@router.get("/{workspace_id}/csv")
+async def get_workspace_csv_endpoint(
+    workspace_id: str,
+    download: bool = Query(False, description="Set true to download file as attachment"),
+    request: Request = None,
+) -> Any:
+    """Fetch or download the migration_status.csv containing all project file information."""
+    ws_dir = workspace_manager.get_workspace_path(workspace_id)
+    csv_path, csv_content, summary = generate_workspace_csv(ws_dir)
+
+    is_csv_requested = download or (request and "text/csv" in request.headers.get("accept", ""))
+    if is_csv_requested:
+        return Response(
+            content=csv_content,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="migration_status_{workspace_id}.csv"',
+                "Content-Type": "text/csv; charset=utf-8",
+            },
+        )
+
+    return CsvStatusResponse(
+        workspace_id=workspace_id,
+        csv_path=str(csv_path),
+        csv_content=csv_content,
+        summary=summary,
+    )
+
+
+@router.post("/{workspace_id}/csv/generate", response_model=CsvStatusResponse)
+async def generate_workspace_csv_endpoint(workspace_id: str) -> CsvStatusResponse:
+    """Regenerate and return the migration_status.csv for the workspace."""
+    ws_dir = workspace_manager.get_workspace_path(workspace_id)
+    csv_path, csv_content, summary = generate_workspace_csv(ws_dir)
+    return CsvStatusResponse(
+        workspace_id=workspace_id,
+        csv_path=str(csv_path),
+        csv_content=csv_content,
+        summary=summary,
+    )
+
+

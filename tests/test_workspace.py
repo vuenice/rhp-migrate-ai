@@ -485,3 +485,140 @@ def test_api_delete_workspace(monkeypatch, tmp_path):
     resp = client.delete(f"/api/workspace/{wid}")
     assert resp.status_code == 200
     assert not wdir.exists()
+
+
+def test_api_workspace_manifest_endpoints(monkeypatch, tmp_path):
+    """Verify GET and POST manifest endpoints for checking and initializing rhp.toml."""
+    workspaces_dir = tmp_path / "rhp_workspaces"
+    monkeypatch.setenv("RHP_WORKSPACES_DIR", str(workspaces_dir))
+    workspace_manager.base_dir = workspaces_dir
+
+    wid, wdir = workspace_manager.create_workspace()
+
+    # 1. Initially, no rhp.toml exists
+    get_resp = client.get(f"/api/workspace/{wid}/manifest")
+    assert get_resp.status_code == 200
+    data = get_resp.json()
+    assert data["has_manifest"] is False
+
+    # 2. Initialize rhp.toml via POST
+    init_resp = client.post(f"/api/workspace/{wid}/manifest/init?package_name=my-app")
+    assert init_resp.status_code == 200
+    init_data = init_resp.json()
+    assert init_data["has_manifest"] is True
+    assert init_data["package_name"] == "my-app"
+    assert (wdir / "rhp.toml").is_file()
+
+    # 3. GET now reports has_manifest = True
+    get_resp2 = client.get(f"/api/workspace/{wid}/manifest")
+    assert get_resp2.status_code == 200
+    assert get_resp2.json()["has_manifest"] is True
+
+
+def test_api_software_info_and_last_opened(monkeypatch, tmp_path):
+    """Verify software-info and last-opened endpoints."""
+    app_dir = tmp_path / "app_software_data"
+    workspaces_dir = app_dir / "projects"
+    monkeypatch.setenv("RHP_APP_DIR", str(app_dir))
+    monkeypatch.setenv("RHP_WORKSPACES_DIR", str(workspaces_dir))
+    workspace_manager.base_dir = workspaces_dir
+
+    # 1. Check software info
+    info_resp = client.get("/api/workspace/software-info")
+    assert info_resp.status_code == 200
+    info_data = info_resp.json()
+    assert "software_dir" in info_data
+    assert "projects_dir" in info_data
+
+    # 2. Initially no last session
+    sess_resp = client.get("/api/workspace/last-opened")
+    assert sess_resp.status_code == 200
+
+    # 3. Create workspace and verify last-opened is updated
+    wid, wdir = workspace_manager.create_workspace()
+    (wdir / "test.php").write_text("<?php echo 1;", encoding="utf-8")
+
+    sess_resp2 = client.get("/api/workspace/last-opened")
+    assert sess_resp2.status_code == 200
+    assert sess_resp2.json()["workspace_id"] == wid
+
+
+def test_api_workspace_state_and_csv_management(monkeypatch, tmp_path):
+    """Verify state persistence, file saving, and CSV generation."""
+    workspaces_dir = tmp_path / "rhp_workspaces"
+    monkeypatch.setenv("RHP_WORKSPACES_DIR", str(workspaces_dir))
+    workspace_manager.base_dir = workspaces_dir
+
+    wid, wdir = workspace_manager.create_workspace()
+    service_dir = wdir / "app" / "Services"
+    service_dir.mkdir(parents=True)
+    php_file = service_dir / "PaymentService.php"
+    php_file.write_text("<?php class PaymentService { public function pay($amt) {} }", encoding="utf-8")
+
+    # 1. Fetch initial state
+    state_resp = client.get(f"/api/workspace/{wid}/state")
+    assert state_resp.status_code == 200
+    state_data = state_resp.json()
+    assert state_data["workspace_id"] == wid
+    assert (wdir / "migration_status.csv").is_file()
+
+    # 2. Save migrated file content
+    migrated_code = "<?rhp class PaymentService { public function pay(float $amt): bool { return true; } }"
+    save_resp = client.post(
+        f"/api/workspace/{wid}/file",
+        json={
+            "path": "app/Services/PaymentService.php",
+            "content": migrated_code,
+            "status": "migrated",
+            "is_rhp": True,
+        },
+    )
+    assert save_resp.status_code == 200
+    save_data = save_resp.json()
+    assert save_data["success"] is True
+    assert (service_dir / "PaymentService.rhp").is_file()
+
+    # 3. Save workspace full state
+    save_state_resp = client.post(
+        f"/api/workspace/{wid}/state",
+        json={
+            "active_file": "app/Services/PaymentService.php",
+            "migrated_files": {"app/Services/PaymentService.php": migrated_code},
+            "file_statuses": {"app/Services/PaymentService.php": "migrated"},
+            "compiler_logs": [{"id": "1", "message": "Compiled successfully"}],
+            "chat_messages": [{"role": "assistant", "content": "Done"}],
+        },
+    )
+    assert save_state_resp.status_code == 200
+    assert save_state_resp.json()["completed_count"] >= 1
+
+    # 4. Fetch CSV JSON and Download CSV file
+    csv_resp = client.get(f"/api/workspace/{wid}/csv")
+    assert csv_resp.status_code == 200
+    csv_data = csv_resp.json()
+    assert "PaymentService.php" in csv_data["csv_content"]
+    assert "completed" in csv_data["csv_content"]
+
+    csv_dl = client.get(f"/api/workspace/{wid}/csv?download=true")
+    assert csv_dl.status_code == 200
+    assert "text/csv" in csv_dl.headers["content-type"]
+    assert "attachment" in csv_dl.headers["content-disposition"]
+    assert "PaymentService.php" in csv_dl.text
+
+
+def test_api_demo_workspace_seeding(monkeypatch, tmp_path):
+    """Verify that accessing demo workspace seeds realistic project and CSV."""
+    workspaces_dir = tmp_path / "rhp_workspaces"
+    monkeypatch.setenv("RHP_WORKSPACES_DIR", str(workspaces_dir))
+    workspace_manager.base_dir = workspaces_dir
+
+    demo_dir = workspaces_dir / "demo"
+    assert not demo_dir.exists()
+
+    resp = client.get("/api/workspace/demo/tree")
+    assert resp.status_code == 200
+    assert demo_dir.is_dir()
+    assert (demo_dir / "migration_status.csv").is_file()
+    assert (demo_dir / "rhp.toml").is_file()
+
+

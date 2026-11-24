@@ -42,6 +42,9 @@ htmlcov/
 node_modules/
 .next/
 out/
+.rhp-data/
+*.tsbuildinfo
+
 
 config.bat
 

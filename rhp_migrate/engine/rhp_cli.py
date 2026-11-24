@@ -40,6 +40,10 @@ class RhpExecutionError(RhpError):
         self.stderr = stderr
 
 
+class RhpManifestNotFoundError(RhpError, FileNotFoundError):
+    """Raised when rhp.toml manifest is missing at project root for single-file migration."""
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models for `rhp migrate` output
 # ---------------------------------------------------------------------------
@@ -78,6 +82,7 @@ class MigrateFileResult(BaseModel):
     ob_rewritten_count: int = Field(0, description="Number of output buffering blocks rewritten")
     echo_response_count: int = Field(0, description="Number of controller echo calls converted to Response returns")
     rade_directive_count: int = Field(0, description="Number of PHP template tags converted to Rade directives")
+    errors: list[str] = Field(default_factory=list, description="File-level migration errors")
     warnings: list[str] = Field(default_factory=list, description="File-level warnings")
 
 
@@ -90,6 +95,7 @@ class MigrateReport(BaseModel):
     files_scanned: int = Field(0, description="Total number of files inspected")
     files_modified: int = Field(0, description="Number of files modified or needing modification")
     results: list[MigrateFileResult] = Field(default_factory=list, description="Per-file migration results")
+    errors: list[str] = Field(default_factory=list, description="Top-level migration errors")
     warnings: list[str] = Field(default_factory=list, description="Top-level migration warnings")
 
     @property
@@ -260,6 +266,14 @@ class CheckReport(BaseModel):
         return [d for d in self.diagnostics if d.level == "warning"]
 
 
+class BuildDiagnostic(CompilerDiagnostic):
+    """Single compiler error, warning, or diagnostic emitted by `rhp build`."""
+
+
+class BuildReport(CheckReport):
+    """Aggregate build report produced by `rhp build --format=json`."""
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models for `rhp lint` output
 # ---------------------------------------------------------------------------
@@ -387,37 +401,156 @@ def get_rhp_binary(custom_path: Optional[Union[str, Path]] = None) -> Path:
 # Execution Functions
 # ---------------------------------------------------------------------------
 
+def find_project_root(start_path: Union[str, Path]) -> Path:
+    """Locate project root by searching upwards for rhp.toml, composer.json, or .git.
+
+    If none found, returns the directory of start_path (or start_path itself if a directory).
+    """
+    p = Path(start_path).resolve()
+    current = p if p.is_dir() else p.parent
+    for parent in [current] + list(current.parents):
+        if (parent / "rhp.toml").is_file() or (parent / "composer.json").is_file() or (parent / ".git").is_dir():
+            return parent
+    return current
+
+
+def has_rhp_manifest(project_root: Union[str, Path]) -> bool:
+    """Return True if rhp.toml exists in the given directory."""
+    root = Path(project_root).resolve()
+    return (root / "rhp.toml").is_file()
+
+
+def create_default_rhp_toml(
+    project_root: Union[str, Path],
+    package_name: Optional[str] = None,
+    psr4_mappings: Optional[dict[str, str]] = None,
+) -> Path:
+    """Create a standard starter rhp.toml manifest in project_root.
+
+    If composer.json is present, inherits package name and PSR-4 autoload rules.
+    """
+    root = Path(project_root).resolve()
+    target = root / "rhp.toml"
+    if target.exists():
+        return target
+
+    name = package_name or root.name or "app"
+    psr4 = psr4_mappings or {}
+
+    composer_path = root / "composer.json"
+    if composer_path.is_file():
+        try:
+            with open(composer_path, encoding="utf-8") as f:
+                cdata = json.load(f)
+            if not package_name and cdata.get("name"):
+                name = cdata["name"]
+            if not psr4 and "autoload" in cdata and "psr-4" in cdata["autoload"]:
+                psr4 = cdata["autoload"]["psr-4"]
+        except Exception:
+            pass
+
+    if not psr4:
+        if (root / "app").is_dir():
+            psr4 = {"App\\": "app/"}
+        elif (root / "src").is_dir():
+            psr4 = {"App\\": "src/"}
+        else:
+            psr4 = {"App\\": "./"}
+
+    def _toml_esc(s: str) -> str:
+        return s.replace("\\", "\\\\")
+
+    psr4_formatted = ", ".join(f'"{_toml_esc(k)}" = "{v}"' for k, v in psr4.items())
+    toml_content = f"""[package]
+name = "{name}"
+version = "0.1.0"
+type = "rhp"
+
+[autoload]
+psr-4 = {{ {psr4_formatted} }}
+
+[server]
+host = "127.0.0.1"
+port = 8080
+
+[logging]
+level = "debug"
+format = "pretty"
+"""
+    target.write_text(toml_content, encoding="utf-8")
+    return target
+
+
 def run_migrate(
     path: Union[str, Path],
     dry_run: bool = False,
     php_version: int = 7,
     bin_path: Optional[Union[str, Path]] = None,
+    file_path: Optional[Union[str, Path]] = None,
+    project_root: Optional[Union[str, Path]] = None,
+    require_manifest: bool = False,
 ) -> MigrateReport:
-    """Execute `rhp migrate <path> --format=json` and parse the output.
+    """Execute `rhp migrate` and parse the output.
+
+    Semantics:
+    - `rhp migrate` only runs on a project (directory).
+    - To run on a particular file, `--file=<PATH>` must be provided.
+    - Single-file migration requires `rhp.toml` at the project root to provide
+      typing and namespace context.
 
     Args:
-        path: Target file or directory to migrate.
+        path: Target file or project directory. If a file is passed or file_path
+              is provided, executes in single-file mode with --file=<path>.
         dry_run: If True, executes dry run (--dry-run) without writing changes to disk.
         php_version: Source PHP version (7 or 8). Default is 7.
         bin_path: Optional custom path to the rhp binary.
+        file_path: Optional explicit single file path to migrate with --file.
+        project_root: Optional explicit project root directory.
+        require_manifest: If True, raises RhpManifestNotFoundError if rhp.toml is missing.
 
     Returns:
         MigrateReport containing files scanned, modified, and per-file transform details.
 
     Raises:
         RhpNotFoundError: If rhp binary cannot be found.
+        RhpManifestNotFoundError: If rhp.toml is missing when migrating a single file and require_manifest=True.
         RhpExecutionError: If rhp returns a non-zero exit code and produces no valid report.
     """
     rhp_bin = get_rhp_binary(bin_path)
-    target = Path(path)
 
-    cmd = [
-        str(rhp_bin),
-        "migrate",
-        str(target),
+    # Determine if single-file mode
+    is_single_file = False
+    target_file: Optional[Path] = None
+
+    if file_path is not None:
+        is_single_file = True
+        target_file = Path(file_path)
+    else:
+        p = Path(path)
+        if p.is_file() or str(path).lower().endswith((".php", ".phtml", ".rhp")):
+            is_single_file = True
+            target_file = p
+
+    cmd: list[str] = [str(rhp_bin), "migrate"]
+
+    if is_single_file and target_file is not None:
+        root = Path(project_root) if project_root else find_project_root(target_file)
+        if require_manifest and not has_rhp_manifest(root):
+            raise RhpManifestNotFoundError(
+                f"'rhp.toml' manifest not found at project root '{root}'. "
+                f"Single-file migration ('rhp migrate --file=...') requires 'rhp.toml' "
+                f"at the project root to resolve namespaces and typing contracts. "
+                f"Please run 'rhp init' or create 'rhp.toml' first."
+            )
+        cmd.append(f"--file={target_file}")
+    else:
+        target_dir = Path(path)
+        cmd.append(str(target_dir))
+
+    cmd.extend([
         "--format=json",
         f"--php-version={php_version}",
-    ]
+    ])
     if dry_run:
         cmd.append("--dry-run")
 
@@ -546,6 +679,108 @@ def run_check(
         status = "error" if errors > 0 else "ok"
 
     return CheckReport(
+        target_path=str(target),
+        status=status,
+        errors=errors,
+        warnings=warnings,
+        diagnostics=diagnostics,
+    )
+
+
+def run_build(
+    path: Union[str, Path],
+    bin_path: Optional[Union[str, Path]] = None,
+    args: Optional[Sequence[str]] = None,
+) -> BuildReport:
+    """Execute `rhp build <path> --format=json` and parse compiler build diagnostics.
+
+    Args:
+        path: Target file or directory to build.
+        bin_path: Optional custom path to the rhp binary.
+        args: Optional additional arguments.
+
+    Returns:
+        BuildReport containing compiler errors, warnings, and file diagnostics.
+
+    Raises:
+        RhpNotFoundError: If rhp binary cannot be found.
+        RhpExecutionError: If rhp crashes or terminates with internal error code.
+    """
+    rhp_bin = get_rhp_binary(bin_path)
+    target = Path(path)
+
+    cmd = [
+        str(rhp_bin),
+        "build",
+        str(target),
+        "--format=json",
+    ]
+    if args:
+        cmd.extend(args)
+
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if proc.returncode != 0 and ("Unknown command" in proc.stderr or "Unknown command" in proc.stdout):
+        check_rep = run_check(target, bin_path=rhp_bin)
+        return BuildReport(
+            target_path=check_rep.target_path,
+            status=check_rep.status,
+            errors=check_rep.errors,
+            warnings=check_rep.warnings,
+            diagnostics=check_rep.diagnostics,
+        )
+
+    stdout = proc.stdout.strip()
+    if proc.returncode >= 2 and not stdout:
+        raise RhpExecutionError(
+            f"rhp build internal error (exit code {proc.returncode}): {proc.stderr}",
+            returncode=proc.returncode,
+            cmd=cmd,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+        )
+
+    diagnostics: list[CompilerDiagnostic] = []
+    errors = 0
+    warnings = 0
+    status = "ok"
+
+    if stdout:
+        for line in stdout.splitlines():
+            line_str = line.strip()
+            if not line_str:
+                continue
+            try:
+                item = json.loads(line_str)
+            except json.JSONDecodeError:
+                continue
+
+            if not isinstance(item, dict):
+                continue
+
+            if item.get("level") == "summary":
+                errors = item.get("errors", errors)
+                warnings = item.get("warnings", warnings)
+                status = item.get("status", status)
+                continue
+
+            try:
+                diag = CompilerDiagnostic.model_validate(item)
+                diagnostics.append(diag)
+            except Exception:
+                continue
+
+    if errors == 0 and warnings == 0 and diagnostics:
+        errors = sum(1 for d in diagnostics if d.level in ("error", "internal_error"))
+        warnings = sum(1 for d in diagnostics if d.level == "warning")
+        status = "error" if errors > 0 else "ok"
+
+    return BuildReport(
         target_path=str(target),
         status=status,
         errors=errors,
@@ -710,6 +945,8 @@ class RhpCli:
         path: Union[str, Path],
         dry_run: bool = False,
         php_version: int = 7,
+        file_path: Optional[Union[str, Path]] = None,
+        require_manifest: bool = False,
     ) -> MigrateReport:
         """Execute `rhp migrate`."""
         return run_migrate(
@@ -717,6 +954,8 @@ class RhpCli:
             dry_run=dry_run,
             php_version=php_version,
             bin_path=self._custom_bin,
+            file_path=file_path,
+            require_manifest=require_manifest,
         )
 
     def lint(
@@ -729,6 +968,18 @@ class RhpCli:
             path=path,
             bin_path=self._custom_bin,
             fix=fix,
+        )
+
+    def build(
+        self,
+        path: Union[str, Path],
+        args: Optional[Sequence[str]] = None,
+    ) -> BuildReport:
+        """Execute `rhp build`."""
+        return run_build(
+            path=path,
+            bin_path=self._custom_bin,
+            args=args,
         )
 
     def check(self, path: Union[str, Path]) -> CheckReport:

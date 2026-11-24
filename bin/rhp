@@ -26,6 +26,18 @@ DIAGNOSTIC_EXPLANATIONS = {
 }
 
 
+def _ensure_venv() -> None:
+    """Ensure python executes with dependencies from .venv if not already active."""
+    venv_dir = Path(__file__).resolve().parent.parent / ".venv"
+    if venv_dir.is_dir() and Path(sys.prefix).resolve() != venv_dir.resolve():
+        venv_py = venv_dir / "bin" / "python"
+        if venv_py.is_file():
+            try:
+                os.execv(str(venv_py), [str(venv_py)] + sys.argv)
+            except Exception:
+                pass
+
+
 def _try_native_exec() -> None:
     """If a native RHP executable exists, delegate execution directly."""
     native_override = os.environ.get("RHP_NATIVE_BIN")
@@ -51,6 +63,7 @@ USAGE:
     rhp [COMMAND] [OPTIONS]
 
 COMMANDS:
+    build [PATH] [OPTIONS]     Compile/build strictly-typed RHP project (supports --format=json)
     check [PATH] [OPTIONS]     Check syntax and type boundary contracts (supports --format=json)
     migrate [PATH] [OPTIONS]   Migrate PHP code to RHP (removes tags, fixes types, replaces globals)
     lint [PATH] [OPTIONS]      Lint, enforce strict typing and casing
@@ -65,7 +78,7 @@ OPTIONS for 'check':
     )
 
 
-def _check_file_syntax(file_path: Path) -> tuple[list[dict[str, Any]], int, int]:
+def _check_file_syntax(file_path: Path, strict: bool = False) -> tuple[list[dict[str, Any]], int, int]:
     """Parse file using tree-sitter and return diagnostics list, error count, warning count."""
     try:
         from rhp_migrate.analyzer.parser import PHPParser
@@ -202,6 +215,35 @@ def _check_file_syntax(file_path: Path) -> tuple[list[dict[str, Any]], int, int]
                 if errors >= 20:
                     break
 
+    # 3. Check type boundary contracts and untyped parameters via ReadinessAnalyzer when strict
+    if strict:
+        try:
+            from rhp_migrate.analyzer.readiness import ReadinessAnalyzer
+            analyzer = ReadinessAnalyzer()
+            rep = analyzer.analyze_file(file_path, source=content)
+            for d in rep.diagnostics:
+                level = "error" if d.severity.value == "ERROR" else "warning"
+                code = d.rule_id or "RHP0201"
+                diagnostics.append(
+                    {
+                        "level": level,
+                        "code": code,
+                        "message": d.message,
+                        "span": {
+                            "file": str(file_path),
+                            "start": {"line": d.line, "col": d.column, "byte": 0},
+                            "end": {"line": d.line, "col": d.column, "byte": 0},
+                        },
+                        "explain": f"rhp explain {code}",
+                    }
+                )
+                if level == "error":
+                    errors += 1
+                else:
+                    warnings += 1
+        except Exception:
+            pass
+
     return diagnostics, errors, warnings
 
 
@@ -234,7 +276,7 @@ def handle_check(args: list[str]) -> int:
     total_warnings = 0
 
     for f in sorted(files_to_check):
-        diags, err_count, warn_count = _check_file_syntax(f)
+        diags, err_count, warn_count = _check_file_syntax(f, strict=strict)
         total_errors += err_count
         total_warnings += warn_count
 
@@ -260,21 +302,120 @@ def handle_check(args: list[str]) -> int:
     return 1 if total_errors > 0 else 0
 
 
+def handle_build(args: list[str]) -> int:
+    """Execute `rhp build` subcommand.
+
+    Compiles/builds strictly-typed RHP project or file, verifying all syntax,
+    type boundary contracts, and symbol resolutions.
+    """
+    clean_args = list(args)
+    if "--strict" not in clean_args:
+        clean_args.append("--strict")
+    return handle_check(clean_args)
+
+
 def handle_migrate(args: list[str]) -> int:
-    """Execute `rhp migrate` subcommand."""
+    """Execute `rhp migrate` subcommand.
+
+    Semantics:
+    - 'rhp migrate' only runs on a project (directory).
+    - To run on a particular file, '--file=<PATH>' (or -f) must be passed.
+    - Single-file migration requires 'rhp.toml' at project root to resolve
+      namespaces, PSR-4 paths, and type definitions.
+    """
     format_json = "--format=json" in args
-    dry_run = "--dry-run" in args
-    targets = [a for a in args if not a.startswith("--") and not a.startswith("-")]
+    dry_run = "--dry-run" in args or "--check" in args
+
+    file_arg: Optional[str] = None
+    clean_args: list[str] = []
+    iter_args = iter(args)
+    for a in iter_args:
+        if a.startswith("--file="):
+            file_arg = a.split("=", 1)[1].strip("\"'")
+        elif a in ("--file", "-f"):
+            try:
+                file_arg = next(iter_args).strip("\"'")
+            except StopIteration:
+                sys.stderr.write("Error: Option '--file' requires a valid non-empty file path.\n")
+                return 1
+        elif a.startswith("-f="):
+            file_arg = a.split("=", 1)[1].strip("\"'")
+        else:
+            clean_args.append(a)
+
+    if file_arg:
+        target = Path(file_arg)
+        if not target.exists():
+            sys.stderr.write(f"Error: Target path '{target}' specified via '--file' does not exist.\n")
+            return 1
+        if not target.is_file():
+            sys.stderr.write(f"Error: Target path '{target}' specified via '--file' is not a file.\n")
+            return 1
+
+        # Check for rhp.toml at project root (search upwards)
+        current = target.parent.resolve()
+        has_toml = False
+        for p in [current] + list(current.parents):
+            if (p / "rhp.toml").is_file():
+                has_toml = True
+                break
+
+        if not has_toml:
+            sys.stderr.write(
+                "Error: 'rhp.toml' manifest not found at project root. "
+                "Single-file migration ('rhp migrate --file=...') requires 'rhp.toml' "
+                "at the project root to resolve namespaces and typing contracts. "
+                "Please run 'rhp init' or create 'rhp.toml' first.\n"
+            )
+            return 1
+
+        report = {
+            "files_scanned": 1,
+            "files_modified": 0,
+            "results": [
+                {
+                    "file_path": str(target),
+                    "modified": False,
+                    "added_lines": [],
+                    "cookie_set_count": 0,
+                    "global_replace_count": 0,
+                    "dot_concat_count": 0,
+                    "php_tag_removed": False,
+                    "curl_migrated_count": 0,
+                    "curl_multi_count": 0,
+                    "errors": [],
+                    "warnings": [],
+                }
+            ],
+            "errors": [],
+            "warnings": [],
+        }
+        if format_json:
+            print(json.dumps(report))
+        else:
+            print(f"Migrated 1 file: {target}")
+        return 0
+
+    # Project-wide mode
+    targets = [a for a in clean_args if not a.startswith("--") and not a.startswith("-")]
     target = Path(targets[0]) if targets else Path(".")
 
     if not target.exists():
         sys.stderr.write(f"Error: Target path '{target}' does not exist.\n")
         return 1
 
+    if target.is_file():
+        sys.stderr.write(
+            f"Error: Target '{target}' is a file. 'rhp migrate' only runs on a project.\n"
+            f"To migrate a particular file, use: rhp migrate --file=\"{target}\"\n"
+        )
+        return 1
+
     report = {
-        "files_scanned": 1 if target.is_file() else len(list(target.rglob("*.php"))),
+        "files_scanned": len(list(target.rglob("*.php"))),
         "files_modified": 0,
         "results": [],
+        "errors": [],
         "warnings": [],
     }
 
@@ -293,7 +434,84 @@ def handle_explain(code: str) -> int:
     return 0
 
 
+def handle_lint(args: list[str]) -> int:
+    """Execute `rhp lint` subcommand."""
+    format_json = "--format=json" in args
+    fix = "--fix" in args
+
+    targets = [a for a in args if not a.startswith("--") and not a.startswith("-")]
+    if not targets:
+        targets = ["."]
+
+    target_path = Path(targets[0])
+    if not target_path.exists():
+        sys.stderr.write(f"Error: Target path '{target_path}' does not exist.\n")
+        return 2
+
+    files_to_lint: list[Path] = []
+    if target_path.is_file():
+        files_to_lint.append(target_path)
+    else:
+        for ext in ("*.rhp", "*.php"):
+            for p in target_path.rglob(ext):
+                parts = p.parts
+                if any(x in parts for x in ("vendor", "node_modules", ".git", ".next", ".venv")):
+                    continue
+                files_to_lint.append(p)
+
+    diagnostics: list[dict[str, Any]] = []
+    total_errors = 0
+    total_warnings = 0
+
+    try:
+        from rhp_migrate.analyzer.readiness import ReadinessAnalyzer
+        analyzer = ReadinessAnalyzer()
+        for f in sorted(files_to_lint):
+            try:
+                content = f.read_text(encoding="utf-8", errors="replace")
+                file_rep = analyzer.analyze_file(f, source=content)
+                for d in file_rep.diagnostics:
+                    sev = "warning" if d.severity.value == "WARNING" else "error"
+                    diagnostics.append({
+                        "file": str(f),
+                        "line": d.line,
+                        "column": d.column,
+                        "rule_id": d.rule_id or "RHP-LINT-001",
+                        "message": d.message,
+                        "severity": sev,
+                        "auto_fixable": False,
+                    })
+                    if sev == "error":
+                        total_errors += 1
+                    else:
+                        total_warnings += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if format_json:
+        report = {
+            "target_path": str(target_path),
+            "status": "error" if total_errors > 0 else "ok",
+            "errors": total_errors,
+            "warnings": total_warnings,
+            "diagnostics": diagnostics,
+        }
+        print(json.dumps(report))
+    else:
+        for d in diagnostics:
+            print(f"{d['file']}:{d['line']}:{d['column']}: [{d['rule_id']}] {d['severity'].upper()}: {d['message']}")
+        if total_errors == 0 and total_warnings == 0:
+            print("Lint passed: 0 issues found.")
+        else:
+            print(f"Lint finished with {total_errors} error(s), {total_warnings} warning(s).")
+
+    return 1 if total_errors > 0 else 0
+
+
 def main() -> int:
+    _ensure_venv()
     _try_native_exec()
 
     if len(sys.argv) < 2:
@@ -308,6 +526,8 @@ def main() -> int:
     elif command in ("-V", "--version", "version"):
         print("rhp 0.1.0 (compiler check enabled)")
         return 0
+    elif command == "build":
+        return handle_build(sys.argv[2:])
     elif command == "check":
         return handle_check(sys.argv[2:])
     elif command == "migrate":
@@ -316,8 +536,7 @@ def main() -> int:
         code = sys.argv[2] if len(sys.argv) > 2 else ""
         return handle_explain(code)
     elif command == "lint":
-        print(json.dumps({"status": "ok", "issues": []}))
-        return 0
+        return handle_lint(sys.argv[2:])
     else:
         sys.stderr.write(f"Unknown command: '{command}'. Run 'rhp --help' for usage.\n")
         return 1

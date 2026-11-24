@@ -333,7 +333,13 @@ def verify_and_heal(
     # 3. Compiler errors exist: Prepare auto-healing loop
     initial_content = path.read_text(encoding="utf-8")
     last_valid_content = initial_content
-    runner = llm_runner or LLMRunner()
+    if llm_runner is None:
+        try:
+            runner = LLMRunner()
+        except Exception:
+            return False
+    else:
+        runner = llm_runner
 
     if is_syntactically_valid(initial_content):
         last_valid_content = initial_content

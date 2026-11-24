@@ -75,7 +75,12 @@ async def migrate_file_endpoint(
     migrate_rep = None
     if rhp_bin:
         try:
-            migrate_rep = run_migrate(file_path, dry_run=True, bin_path=rhp_bin)
+            migrate_rep = run_migrate(
+                Path(file_path).parent,
+                file_path=file_path,
+                dry_run=True,
+                bin_path=rhp_bin,
+            )
             file_res = migrate_rep.get_file_result(file_path)
             if file_res and file_res.modified:
                 deterministic_edits += 1
@@ -126,8 +131,8 @@ async def migrate_file_endpoint(
             seen_units.add(unit.identifier)
             units_to_migrate.append(unit)
 
-    # If no specific functions/methods flagged, but file is untyped, migrate whole unit
-    if not units_to_migrate and file_rep.untyped_param_count > 0:
+    # If no specific functions/methods flagged, but file has untyped parameters or diagnostics, migrate whole unit
+    if not units_to_migrate and (file_rep.untyped_param_count > 0 or file_rep.diagnostics):
         unit = find_code_unit(current_content, 1, file_path=file_path)
         units_to_migrate.append(unit)
 
@@ -321,7 +326,7 @@ async def migrate_stream_endpoint(
                     seen_units.add(unit.identifier)
                     units_to_migrate.append(unit)
 
-            if not units_to_migrate and file_rep.untyped_param_count > 0:
+            if not units_to_migrate and (file_rep.untyped_param_count > 0 or file_rep.diagnostics):
                 unit = find_code_unit(current_content, 1, file_path=file_path)
                 units_to_migrate.append(unit)
 

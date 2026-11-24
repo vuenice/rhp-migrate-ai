@@ -31,8 +31,12 @@ from rhp_migrate.core.git_manager import GitManager
 from rhp_migrate.core.version_detector import detect_php_version
 from rhp_migrate.engine.fallback_rules import apply_fallback_rules
 from rhp_migrate.engine.rhp_cli import (
+    BuildReport,
+    LintReport,
+    MigrateReport,
     RhpNotFoundError,
     find_rhp_binary,
+    run_build,
     run_check,
     run_lint,
     run_migrate,
@@ -135,6 +139,95 @@ def render_analysis_table(target_path: Path, analyzer: ReadinessAnalyzer) -> Non
                 score_str = f"{fr.readiness_percentage * 100:.0f}%" if fr else "-"
                 order_table.add_row(str(idx), p.name, score_str)
             console.print(order_table)
+
+
+def _handle_companion_files(
+    companion_files: list[Any],
+    base_dir: Path,
+    git_mgr: Optional[GitManager],
+    dry_run: bool,
+) -> None:
+    """Write companion files (e.g. .rade.rhp templates) to disk and stage in git."""
+    for comp in companion_files:
+        comp_path = (base_dir / comp.file_path).resolve()
+        if not dry_run:
+            comp_path.parent.mkdir(parents=True, exist_ok=True)
+            comp_path.write_text(comp.content, encoding="utf-8")
+        console.print(
+            f"[bold green]Created companion template:[/bold green] [cyan]{comp.file_path}[/cyan]"
+        )
+        if git_mgr is not None and not dry_run and git_mgr.is_git_repo():
+            try:
+                git_mgr._run_git(["add", str(comp_path)])
+            except Exception:
+                pass
+
+
+def _extract_units_for_errors(
+    source: str,
+    file_path: Path,
+    errors: list[str],
+    warnings: list[str],
+) -> list[CodeUnit]:
+    """Identify targeted code units for errors/warnings."""
+    units: list[CodeUnit] = []
+    seen: set[str] = set()
+
+    for msg in errors + warnings:
+        m = re.search(r"line\s+(\d+)", msg, re.IGNORECASE)
+        if m:
+            line_num = int(m.group(1))
+            unit = find_code_unit(source, line_num, file_path=file_path)
+            if unit.identifier not in seen and not unit.is_whole_file:
+                seen.add(unit.identifier)
+                units.append(unit)
+
+    if not units:
+        analyzer = ReadinessAnalyzer()
+        rep = analyzer.analyze_file(file_path, source=source)
+        for diag in rep.diagnostics:
+            unit = find_code_unit(source, diag.line, file_path=file_path)
+            if unit.identifier not in seen and not unit.is_whole_file:
+                seen.add(unit.identifier)
+                units.append(unit)
+
+    if not units:
+        unit = find_code_unit(source, 1, file_path=file_path)
+        units.append(unit)
+
+    return units
+
+
+def _extract_units_for_diagnostics(
+    source: str,
+    file_path: Path,
+    diagnostics: list[Any],
+) -> list[CodeUnit]:
+    """Identify targeted code units for lint/build diagnostics."""
+    units: list[CodeUnit] = []
+    seen: set[str] = set()
+
+    for d in diagnostics:
+        line_num = getattr(d, "line", 1)
+        unit = find_code_unit(source, line_num, file_path=file_path)
+        if unit.identifier not in seen and not unit.is_whole_file:
+            seen.add(unit.identifier)
+            units.append(unit)
+
+    if not units:
+        analyzer = ReadinessAnalyzer()
+        rep = analyzer.analyze_file(file_path, source=source)
+        for diag in rep.diagnostics:
+            unit = find_code_unit(source, diag.line, file_path=file_path)
+            if unit.identifier not in seen and not unit.is_whole_file:
+                seen.add(unit.identifier)
+                units.append(unit)
+
+    if not units:
+        unit = find_code_unit(source, 1, file_path=file_path)
+        units.append(unit)
+
+    return units
 
 
 @app.command(name="migrate")
@@ -279,295 +372,356 @@ def main(
             )
             llm_runner = None
 
-    # 6. Incremental Migration Loop
-    files_scanned = 0
+    # 6. Whole-Project 3-Stage Migration Pipeline
+    # Snapshot original contents
+    original_contents: dict[Path, str] = {f: f.read_text(encoding="utf-8") for f in ordered_files}
+    post_migrate_contents: dict[Path, str] = {}
+    healing_logs_by_file: dict[Path, list[str]] = {f: [] for f in ordered_files}
+
+    settings_dict = {"ai": ai, "model": model, "max_retries": max_retries}
+    files_to_process = [
+        f for f in ordered_files
+        if not (cache_mgr is not None and cache_mgr.should_skip(f, original_contents[f], settings_dict))
+    ]
+
+    files_scanned = len(ordered_files)
     deterministic_edits = 0
     llm_functions = 0
     todos_marked = 0
-    settings_dict = {"ai": ai, "model": model, "max_retries": max_retries}
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        TimeElapsedColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task("[cyan]Migrating codebase...", total=len(ordered_files))
+    if not files_to_process:
+        console.print("[green]All files are up-to-date in cache. Skipping migration.[/green]")
+        _print_summary_table(
+            files_scanned=files_scanned,
+            deterministic_edits=0,
+            llm_functions=0,
+            todos_marked=0,
+            token_cost=0.0,
+        )
+        return
 
-        for file_path in ordered_files:
-            progress.update(task, description=f"[cyan]Processing {file_path.name}...")
-            files_scanned += 1
-            content = file_path.read_text(encoding="utf-8")
+    rhp_bin = find_rhp_binary()
 
-            # Check cache
-            if cache_mgr is not None and cache_mgr.should_skip(file_path, content, settings_dict):
-                progress.advance(task)
-                continue
+    # =========================================================================
+    # STAGE 1: Deterministic `rhp migrate` on Whole Project
+    # =========================================================================
+    console.print("\n[bold cyan]─── Stage 1: Deterministic 'rhp migrate' (Whole Project) ───[/bold cyan]")
+    migrate_rep: Optional[MigrateReport] = None
+    if rhp_bin:
+        try:
+            if target_path.is_file():
+                migrate_rep = run_migrate(
+                    target_path.parent,
+                    file_path=target_path,
+                    dry_run=dry_run,
+                    php_version=detected_php.major,
+                    bin_path=rhp_bin,
+                )
+            else:
+                migrate_rep = run_migrate(
+                    target_path,
+                    dry_run=dry_run,
+                    php_version=detected_php.major,
+                    bin_path=rhp_bin,
+                )
+        except Exception as exc:
+            console.print(f"[dim]rhp migrate notice: {exc}[/dim]")
 
-            current_content = content
-            file_deterministic_edits = 0
-            migrate_rep = None
-            post_migrate_content = current_content
-
-            # Step A: Deterministic Native `rhp migrate` if binary available
-            rhp_bin = find_rhp_binary()
-            if rhp_bin:
-                try:
-                    migrate_rep = run_migrate(
-                        file_path,
-                        dry_run=dry_run,
-                        php_version=detected_php.major,
-                        bin_path=rhp_bin,
-                    )
-                    file_res = migrate_rep.get_file_result(file_path)
-                    if file_res and file_res.modified:
-                        file_deterministic_edits += (
-                            file_res.cookie_set_count
-                            + file_res.global_replace_count
-                            + file_res.dot_concat_count
-                            + file_res.curl_migrated_count
-                            + file_res.heredoc_count
-                            + file_res.declare_count
-                            + file_res.error_reporting_count
-                            + file_res.ini_set_count
-                            + file_res.cast_count
-                            + file_res.list_destructure_count
-                            + file_res.foreach_count
-                            + file_res.get_replace_count
-                            + file_res.post_replace_count
-                            + file_res.error_suppress_count
-                            + file_res.var_dump_count
-                            + file_res.strict_eq_count
-                            + file_res.legacy_include_count
-                            + file_res.ob_rewritten_count
-                            + file_res.echo_response_count
-                            + file_res.rade_directive_count
-                            + (1 if file_res.php_tag_removed else 0)
-                        )
-                        if not dry_run and file_path.exists():
-                            post_migrate_content = file_path.read_text(encoding="utf-8")
-                            current_content = post_migrate_content
-                except Exception:
-                    pass
-
-            # Step B: Native `rhp lint`
-            lint_rep = None
-            if rhp_bin:
-                try:
-                    lint_rep = run_lint(file_path, bin_path=rhp_bin)
-                except Exception:
-                    pass
-
-            # Step C: AST Fallback Rules
-            fb_res = apply_fallback_rules(current_content)
-            if fb_res.modified:
-                file_deterministic_edits += len(fb_res.edits)
-                current_content = fb_res.transformed_code
-                if not dry_run:
-                    file_path.write_text(current_content, encoding="utf-8")
-
-            deterministic_edits += file_deterministic_edits
-
-            # Step C.5: Deterministic Syntax Validation & Mistake Audit
-            # Assume deterministic passes are not perfect and make mistakes.
-            # Check if output syntax is valid; if invalid, extract defects, before/after syntax,
-            # what could have been done better, record a report on this app, and suggest context updates.
-            validator = DeterministicValidator()
-            audit_record = validator.validate(
-                before_code=content,
-                after_code=current_content,
-                file_path=file_path,
-                bin_path=rhp_bin,
-            )
-            deterministic_compiler_errors: list[str] = []
-            if not audit_record.is_valid:
-                report_file = validator.record_report(audit_record, base_dir=base_dir)
-                for err in audit_record.errors:
-                    loc = f"line {err.line}:{err.column}"
-                    code_prefix = f"[{err.error_code}] " if err.error_code else ""
-                    deterministic_compiler_errors.append(f"{code_prefix}{loc}: {err.message}")
-
-                try:
-                    rel_report = report_file.relative_to(base_dir)
-                except ValueError:
-                    rel_report = report_file
-
-                console.print(
-                    Panel.fit(
-                        f"[bold red]Deterministic Migration Syntax Defect Detected:[/bold red] {file_path.name}\n"
-                        f"[yellow]What is invalid:[/yellow] {audit_record.what_is_invalid}\n"
-                        f"[dim]Recorded audit report: {rel_report}[/dim]",
-                        title="Deterministic Audit Warning",
-                        border_style="red",
-                    )
+    # Accumulate metrics from migrate_rep
+    if migrate_rep:
+        for f in files_to_process:
+            file_res = migrate_rep.get_file_result(f)
+            if file_res and file_res.modified:
+                deterministic_edits += (
+                    file_res.cookie_set_count
+                    + file_res.global_replace_count
+                    + file_res.dot_concat_count
+                    + file_res.curl_migrated_count
+                    + file_res.heredoc_count
+                    + file_res.declare_count
+                    + file_res.error_reporting_count
+                    + file_res.ini_set_count
+                    + file_res.cast_count
+                    + file_res.list_destructure_count
+                    + file_res.foreach_count
+                    + file_res.get_replace_count
+                    + file_res.post_replace_count
+                    + file_res.error_suppress_count
+                    + file_res.var_dump_count
+                    + file_res.strict_eq_count
+                    + file_res.legacy_include_count
+                    + file_res.ob_rewritten_count
+                    + file_res.echo_response_count
+                    + file_res.rade_directive_count
+                    + (1 if file_res.php_tag_removed else 0)
                 )
 
-            # Step D: LLM Stage for Leftovers
-            if ai and llm_runner:
-                analyzer = ReadinessAnalyzer()
-                file_rep = analyzer.analyze_file(file_path, source=current_content)
-                units_to_migrate: list[CodeUnit] = []
-                seen_units: set[str] = set()
+    # Apply AST fallback rules
+    for f in files_to_process:
+        curr_text = f.read_text(encoding="utf-8")
+        fb_res = apply_fallback_rules(curr_text)
+        if fb_res.modified:
+            deterministic_edits += len(fb_res.edits)
+            curr_text = fb_res.transformed_code
+            if not dry_run:
+                f.write_text(curr_text, encoding="utf-8")
 
-                for diag in file_rep.diagnostics:
-                    unit = find_code_unit(current_content, diag.line, file_path=file_path)
-                    if unit.identifier not in seen_units and not unit.is_whole_file:
-                        seen_units.add(unit.identifier)
-                        units_to_migrate.append(unit)
+    # Snapshot post-migrate contents
+    for f in files_to_process:
+        post_migrate_contents[f] = f.read_text(encoding="utf-8")
 
-                # If deterministic errors exist but no unit was flagged, add whole-file / failing unit
-                if not units_to_migrate and not audit_record.is_valid and audit_record.errors:
-                    err_line = audit_record.errors[0].line
-                    unit = find_code_unit(current_content, err_line, file_path=file_path)
-                    if unit.identifier not in seen_units:
-                        seen_units.add(unit.identifier)
-                        units_to_migrate.append(unit)
+    # Deterministic syntax audit across files
+    validator = DeterministicValidator()
+    audit_records: dict[Path, Any] = {}
+    stage1_errors_by_file: dict[Path, list[str]] = {}
+    stage1_warnings_by_file: dict[Path, list[str]] = {}
 
-                for unit in units_to_migrate:
+    for f in files_to_process:
+        curr_text = f.read_text(encoding="utf-8")
+        rec = validator.validate(
+            before_code=original_contents[f],
+            after_code=curr_text,
+            file_path=f,
+            bin_path=rhp_bin,
+        )
+        audit_records[f] = rec
+        errs: list[str] = []
+        warns: list[str] = []
+        if migrate_rep:
+            f_res = migrate_rep.get_file_result(f)
+            if f_res:
+                errs.extend(f_res.errors)
+                warns.extend(f_res.warnings)
+        if not rec.is_valid:
+            for d_err in rec.errors:
+                loc = f"line {d_err.line}:{d_err.column}"
+                code_prefix = f"[{d_err.error_code}] " if d_err.error_code else ""
+                errs.append(f"{code_prefix}{loc}: {d_err.message}")
+            validator.record_report(rec, base_dir=base_dir)
+
+        if errs:
+            stage1_errors_by_file[f] = errs
+        if warns:
+            stage1_warnings_by_file[f] = warns
+
+    # If errors/warnings in Stage 1, invoke AI operation ONLY on those files
+    stage1_troubled_files = set(stage1_errors_by_file.keys()) | set(stage1_warnings_by_file.keys())
+    if stage1_troubled_files:
+        console.print(
+            f"[yellow]Deterministic 'rhp migrate' produced errors/warnings on {len(stage1_troubled_files)} file(s). Performing AI operations...[/yellow]"
+        )
+        if ai and llm_runner:
+            for f in sorted(stage1_troubled_files):
+                curr_text = f.read_text(encoding="utf-8")
+                f_errs = stage1_errors_by_file.get(f, [])
+                f_warns = stage1_warnings_by_file.get(f, [])
+                units = _extract_units_for_errors(curr_text, f, f_errs, f_warns)
+                for unit in units:
                     try:
-                        # Feed deterministic compiler errors if unit overlaps failing line
-                        unit_compiler_errors: list[str] = []
-                        if deterministic_compiler_errors:
-                            for d_err in audit_record.errors:
-                                if unit.start_line <= d_err.line <= unit.end_line:
-                                    unit_compiler_errors.append(f"line {d_err.line}: {d_err.message}")
-                        if not unit_compiler_errors and deterministic_compiler_errors:
-                            unit_compiler_errors = deterministic_compiler_errors
-
                         ai_resp = llm_runner.migrate_unit(
                             unit_identifier=unit.identifier,
                             code=unit.code,
-                            compiler_errors=unit_compiler_errors if unit_compiler_errors else None,
+                            compiler_errors=f_errs if f_errs else None,
+                            extra_instructions=(
+                                f"Deterministic 'rhp migrate' produced errors/warnings on this use case: "
+                                f"{'; '.join(f_errs + f_warns)}. "
+                                f"Analyze why 'rhp migrate' was not successful doing that use case, "
+                                f"resolve all errors and warnings, and return clean strictly-typed RHP code."
+                            ),
                         )
                         transformed = clean_code_fence(ai_resp.result.transformed_code)
                         if transformed and transformed != unit.code:
-                            current_content = replace_unit_in_source(
-                                current_content, unit, transformed
-                            )
+                            curr_text = replace_unit_in_source(curr_text, unit, transformed)
                             if not dry_run:
-                                file_path.write_text(current_content, encoding="utf-8")
+                                f.write_text(curr_text, encoding="utf-8")
                             llm_functions += 1
-
-                        # Handle companion files (e.g. extracted .rade.rhp templates)
-                        if ai_resp.result.companion_files:
-                            for comp in ai_resp.result.companion_files:
-                                comp_path = (base_dir / comp.file_path).resolve()
-                                if not dry_run:
-                                    comp_path.parent.mkdir(parents=True, exist_ok=True)
-                                    comp_path.write_text(comp.content, encoding="utf-8")
-                                console.print(
-                                    f"[bold green]Created companion template:[/bold green] [cyan]{comp.file_path}[/cyan]"
-                                )
-                                if git_mgr is not None and not dry_run and git_mgr.is_git_repo():
-                                    try:
-                                        git_mgr._run_git(["add", str(comp_path)])
-                                    except Exception:
-                                        pass
-
+                        _handle_companion_files(ai_resp.result.companion_files, base_dir, git_mgr, dry_run)
                         if ai_resp.result.needs_human_review:
                             reason = ai_resp.result.review_reason or "Review required"
-                            current_content = insert_todo_above_unit(
-                                current_content,
-                                line_number=unit.start_line,
-                                error_message=reason,
-                                file_path=file_path,
-                            )
+                            curr_text = insert_todo_above_unit(curr_text, unit.start_line, reason, f)
                             if not dry_run:
-                                file_path.write_text(current_content, encoding="utf-8")
+                                f.write_text(curr_text, encoding="utf-8")
                             todos_marked += 1
                     except Exception:
                         pass
+    else:
+        console.print("[green]✔ Stage 1 completed with 0 deterministic errors/warnings.[/green]")
 
-            # Step E: Verification and Auto-Healing with healing audit
-            healing_log: list[str] = []
-            verified = False
-            try:
-                if not dry_run:
-                    verified = verify_and_heal(
-                        file_path,
-                        max_retries=max_retries,
-                        llm_runner=llm_runner,
-                        healing_log_out=healing_log,
-                    )
-                else:
-                    verified = True
-            except RhpNotFoundError:
-                verified = is_syntactically_valid(current_content)
+    # =========================================================================
+    # STAGE 2: Whole-Project Linting (`rhp lint`)
+    # =========================================================================
+    console.print("\n[bold cyan]─── Stage 2: Whole-Project Linting ('rhp lint') ───[/bold cyan]")
+    lint_rep: Optional[LintReport] = None
+    if rhp_bin:
+        try:
+            lint_rep = run_lint(target_path, bin_path=rhp_bin, fix=True)
+        except Exception as exc:
+            console.print(f"[dim]rhp lint notice: {exc}[/dim]")
 
-            # Check final code for // RHP-TODO occurrences
-            if not dry_run and file_path.exists():
-                final_code = file_path.read_text(encoding="utf-8")
-            else:
-                final_code = current_content
-            file_todos = len(re.findall(r"//\s*RHP-TODO", final_code))
-            if file_todos > todos_marked:
-                todos_marked = file_todos
+    lint_diags_by_file: dict[Path, list[Any]] = {}
+    if lint_rep and lint_rep.diagnostics:
+        for diag in lint_rep.diagnostics:
+            p = Path(diag.file).resolve() if diag.file and Path(diag.file).exists() else target_path
+            lint_diags_by_file.setdefault(p, []).append(diag)
 
-            # Capture check report for critic
-            check_rep = None
-            if rhp_bin and file_path.exists():
-                try:
-                    check_rep = run_check(file_path, bin_path=rhp_bin)
-                except Exception:
-                    pass
-
-            # Step F: AI Continuous Improvement Critic & Centralized Dispatch
-            if ai and critic and llm_runner:
-                try:
-                    critic_agent = MigrationCritic(runner=llm_runner)
-                    critic_report = critic_agent.analyze(
-                        file_path=file_path,
-                        php_version=effective_php,
-                        original_code=content,
-                        migrated_code=post_migrate_content,
-                        final_code=final_code,
-                        migrate_report=migrate_rep,
-                        lint_report=lint_rep,
-                        check_report=check_rep,
-                        healing_log=healing_log,
-                    )
-                    # Merge deterministic audit mistakes into critic report
-                    if not audit_record.is_valid:
-                        critic_report.migrate_mistakes.extend(audit_record.to_critic_mistakes())
-
-                    dispatcher = FeedbackDispatcher(base_dir=base_dir, central_url=central_url)
-                    dispatcher.dispatch(critic_report)
-                except Exception:
-                    pass
-
-
-            # Step G: Atomic Git Commit
-            if git_mgr is not None and not dry_run and verified:
-                classes = classes_by_file.get(file_path, [])
-                if classes:
-                    unit_name = classes[0].fqcn
-                else:
+    if lint_diags_by_file:
+        console.print(
+            f"[yellow]Stage 2 linting produced {len(lint_rep.diagnostics)} diagnostic(s) across {len(lint_diags_by_file)} file(s). Performing AI operations...[/yellow]"
+        )
+        if ai and llm_runner:
+            for f, diags in sorted(lint_diags_by_file.items()):
+                if not f.exists():
+                    continue
+                curr_text = f.read_text(encoding="utf-8")
+                diag_msgs = [f"line {d.line}:{d.column}: [{d.rule_id}] {d.message}" for d in diags]
+                units = _extract_units_for_diagnostics(curr_text, f, diags)
+                for unit in units:
                     try:
-                        unit_name = str(file_path.relative_to(git_mgr.repo_path))
-                    except ValueError:
-                        unit_name = file_path.name
+                        ai_resp = llm_runner.migrate_unit(
+                            unit_identifier=unit.identifier,
+                            code=unit.code,
+                            compiler_errors=diag_msgs,
+                            extra_instructions=(
+                                f"Linting flagged issues after migration: {'; '.join(diag_msgs)}. "
+                                f"Analyze why migration command was not successful producing lint-clean code for this use case, "
+                                f"resolve the lint issues, enforce strict typing and naming, and return strictly-typed RHP code."
+                            ),
+                        )
+                        transformed = clean_code_fence(ai_resp.result.transformed_code)
+                        if transformed and transformed != unit.code:
+                            curr_text = replace_unit_in_source(curr_text, unit, transformed)
+                            if not dry_run:
+                                f.write_text(curr_text, encoding="utf-8")
+                            llm_functions += 1
+                        _handle_companion_files(ai_resp.result.companion_files, base_dir, git_mgr, dry_run)
+                        if ai_resp.result.needs_human_review:
+                            reason = ai_resp.result.review_reason or "Review required"
+                            curr_text = insert_todo_above_unit(curr_text, unit.start_line, reason, f)
+                            if not dry_run:
+                                f.write_text(curr_text, encoding="utf-8")
+                            todos_marked += 1
+                    except Exception:
+                        pass
+    else:
+        console.print("[green]✔ Stage 2 completed with 0 lint errors/warnings.[/green]")
+
+    # =========================================================================
+    # STAGE 3: Whole-Project Build (`rhp build`)
+    # =========================================================================
+    console.print("\n[bold cyan]─── Stage 3: Whole-Project Build ('rhp build') ───[/bold cyan]")
+    build_rep: Optional[BuildReport] = None
+    if rhp_bin:
+        try:
+            build_rep = run_build(target_path, bin_path=rhp_bin)
+        except Exception as exc:
+            console.print(f"[dim]rhp build notice: {exc}[/dim]")
+
+    build_diags_by_file: dict[Path, list[Any]] = {}
+    if build_rep and build_rep.diagnostics:
+        for diag in build_rep.diagnostics:
+            p = Path(diag.file).resolve() if diag.file and Path(diag.file).exists() else target_path
+            build_diags_by_file.setdefault(p, []).append(diag)
+
+    # Fallback to analyzer diagnostics if binary is unavailable or produced no diagnostics
+    if not rhp_bin or not build_rep:
+        analyzer = ReadinessAnalyzer()
+        for f in files_to_process:
+            c_text = f.read_text(encoding="utf-8")
+            f_rep = analyzer.analyze_file(f, source=c_text)
+            if f_rep.diagnostics:
+                build_diags_by_file.setdefault(f, []).extend(f_rep.diagnostics)
+
+    if build_diags_by_file:
+        console.print(
+            f"[yellow]Stage 3 build produced issues across {len(build_diags_by_file)} file(s). Performing AI healing & cause analysis...[/yellow]"
+        )
+        if ai and llm_runner:
+            for f in sorted(build_diags_by_file.keys()):
+                if not f.exists():
+                    continue
+                h_log = healing_logs_by_file[f]
+                verified = False
                 try:
-                    git_mgr.commit_file(file_path, unit_name=unit_name)
-                except Exception as exc:
-                    console.print(f"[yellow]Warning: Git commit failed for {unit_name}: {exc}[/yellow]")
+                    if not dry_run:
+                        verified = verify_and_heal(
+                            f,
+                            max_retries=max_retries,
+                            llm_runner=llm_runner,
+                            healing_log_out=h_log,
+                            extra_instructions=(
+                                "Compiler build failed on this use case. Analyze why the migration command was not successful "
+                                "doing that use case, resolve all type errors and boundary contracts, and return clean RHP code."
+                            ),
+                        )
+                        if h_log:
+                            llm_functions += len(h_log)
+                        else:
+                            # If verify_and_heal completed with 0 retries or unit fix
+                            llm_functions += 1
+                    else:
+                        verified = True
+                        llm_functions += 1
+                except RhpNotFoundError:
+                    verified = is_syntactically_valid(f.read_text(encoding="utf-8"))
+                    llm_functions += 1
+    else:
+        console.print("[green]✔ Stage 3 completed with 0 build errors/warnings.[/green]")
 
-            # Step H: Update Cache
-            if cache_mgr is not None and not dry_run:
-                cache_mgr.update(
-                    file_path=file_path,
-                    content=content,
-                    settings=settings_dict,
-                    verified=verified,
-                    stats={
-                        "deterministic_edits": file_deterministic_edits,
-                        "verified": verified,
-                    },
+    # =========================================================================
+    # STAGE 4: Continuous Improvement Critic, Commits, and Cache
+    # =========================================================================
+    for f in files_to_process:
+        final_code = f.read_text(encoding="utf-8") if f.exists() else ""
+        file_todos = len(re.findall(r"//\s*RHP-TODO", final_code))
+        if file_todos > todos_marked:
+            todos_marked = file_todos
+
+        # AI Critic & Centralized Feedback Loop
+        if ai and critic and llm_runner:
+            try:
+                critic_agent = MigrationCritic(runner=llm_runner)
+                critic_report = critic_agent.analyze(
+                    file_path=f,
+                    php_version=effective_php,
+                    original_code=original_contents.get(f, ""),
+                    migrated_code=post_migrate_contents.get(f, ""),
+                    final_code=final_code,
+                    migrate_report=migrate_rep,
+                    lint_report=lint_rep,
+                    check_report=build_rep,
+                    healing_log=healing_logs_by_file.get(f, []),
                 )
-                cache_mgr.save()
+                rec = audit_records.get(f)
+                if rec and not rec.is_valid:
+                    critic_report.migrate_mistakes.extend(rec.to_critic_mistakes())
+                dispatcher = FeedbackDispatcher(base_dir=base_dir, central_url=central_url)
+                dispatcher.dispatch(critic_report)
+            except Exception:
+                pass
 
-            progress.advance(task)
+        # Atomic Git Commit
+        verified = is_syntactically_valid(final_code)
+        if git_mgr is not None and not dry_run and verified:
+            classes = classes_by_file.get(f, [])
+            unit_name = classes[0].fqcn if classes else (str(f.relative_to(git_mgr.repo_path)) if f.is_relative_to(git_mgr.repo_path) else f.name)
+            try:
+                git_mgr.commit_file(f, unit_name=unit_name)
+            except Exception as exc:
+                console.print(f"[yellow]Warning: Git commit failed for {unit_name}: {exc}[/yellow]")
+
+        # Update cache
+        if cache_mgr is not None and not dry_run:
+            cache_mgr.update(
+                file_path=f,
+                content=original_contents.get(f, ""),
+                settings=settings_dict,
+                verified=verified,
+                stats={
+                    "deterministic_edits": deterministic_edits,
+                    "verified": verified,
+                },
+            )
+            cache_mgr.save()
 
     # 7. Print Final Summary Table
     token_cost = llm_runner.total_cost_usd if llm_runner else 0.0
@@ -753,7 +907,7 @@ def audit_deterministic(
         # Apply deterministic passes
         if rhp_bin:
             try:
-                rep = run_migrate(file_p, dry_run=True, php_version=eff_major, bin_path=rhp_bin)
+                rep = run_migrate(file_p.parent, file_path=file_p, dry_run=True, php_version=eff_major, bin_path=rhp_bin)
             except Exception:
                 pass
         fb = apply_fallback_rules(current)

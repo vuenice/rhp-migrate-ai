@@ -10,43 +10,34 @@ This skill guides the AI agent through migrating legacy dynamically-typed PHP (P
 
 ---
 
-## 1. Migration Pipeline Sequence
+## 1. Migration Pipeline Sequence (Whole-Project 3-Stage Architecture)
+
+The migration pipeline operates **project-wide** across 3 distinct tiers. AI is **never** invoked on every file indiscriminately; instead, deterministic CLI tools execute first across the whole project, and AI is triggered **strictly on the errors and warnings** produced at each stage to fix them and explain the root cause:
 
 1. **Target PHP Version Discovery**:
    - Detect version from `composer.json` (`require.php` or `config.platform.php`).
    - If absent, check `Dockerfile` (`FROM php:8.x...`).
    - If absent, inspect CLI `php -v`.
 
-2. **Deterministic Stage (`rhp migrate`)**:
-   - Strip script tags (`<?php`, `?>`).
-   - Replace strict equality `===` / `!==` with `==` / `!=`.
-   - Strip `declare(strict_types=1);`.
-   - Upgrade superglobals (`$_GET`, `$_POST`) to `Request` facade.
-   - Convert `curl_*` to `Http::*`.
+2. **Stage 1: Whole-Project Deterministic Migration (`rhp migrate`)**:
+   - Native `rhp migrate` runs on the whole project first (or single target file).
+   - Strips script tags (`<?php`, `?>`), replaces strict equality `===`/`!==`, removes `declare(strict_types=1);`, upgrades superglobals to `Request` facade, converts `curl_*` to `Http::*`.
+   - Files with 0 errors and 0 warnings are migrated cleanly with **0 AI cost**.
+   - **AI Operation on Errors/Warnings**: Triggered only for files/units where `rhp migrate` flagged errors or warnings, checking why the deterministic command was unsuccessful for that use case and healing the code.
 
-3. **Linting Stage (`rhp lint`)**:
-   - Check code formatting, unused variables, and style rules.
-   - Run `--fix` where auto-fixable.
+3. **Stage 2: Whole-Project Linting (`rhp lint`)**:
+   - Run `rhp lint` across the whole project (with `--fix` where auto-fixable).
+   - If lint errors or warnings remain, **AI is invoked** to resolve them, enforce strict typing/naming conventions, and analyze why the migration command did not produce lint-clean code for that use case.
 
-4. **Compiler Type-Checking (`rhp check`)**:
-   - Compiler is the source of truth.
-   - Run `rhp check --format=json`.
+4. **Stage 3: Whole-Project Build & Compiler Contracts (`rhp build`)**:
+   - Run `rhp build --format=json` across the project.
+   - If build/compiler errors are produced, **AI is invoked in an iterative compiler-guided healing loop** (up to `max_retries`).
+   - The AI checks why migration was not successful for that type/symbol contract use case, resolves all errors, and verifies that `rhp build` passes.
+   - If unresolved after max retries, tags the failing unit with `// RHP-TODO(failed-build): <error>`.
 
-5. **AI Healing & Disambiguation**:
-   - Resolve leftover compiler errors iteratively.
-   - Disambiguate PHP arrays into `T[]` or `dict<string, T>`.
-   - Eliminate runtime reflection (`ReflectionClass`, `eval`, `$$var`) using dependency injection or static registries.
-
-6. **Continuous Improvement Critic & Feedback Loop**:
-   - Critique every file migration across 7 dimensions:
-     1. Mistakes made by `rhp migrate` (with before/after/expected samples).
-     2. Missed deterministic opportunities for `rhp migrate`.
-     3. Mistakes made by `rhp lint`.
-     4. Missed linting opportunities.
-     5. Complexities/difficulties faced by LLM.
-     6. Missing RHP language features or standard library gaps.
-     7. Formulate a markdown block (`context_proposal`) ready for approval.
-   - Dispatches reports to `.rhp/feedback/` and centralized remote endpoint.
+5. **Continuous Improvement Critic & Feedback Loop**:
+   - Evaluates failing use cases across 7 dimensions (deterministic mistakes, missed opportunities, lint issues, build gaps, LLM difficulties, language gaps, context proposals).
+   - Saves findings to `.rhp/feedback/pending_context.md` for permanent rule improvement.
 
 ---
 

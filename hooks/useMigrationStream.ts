@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import { BYOKConfig, CompilerLogEntry } from "@/types/workbench";
-import { buildBYOKHeaders } from "@/lib/byok";
+import { buildBYOKHeaders, isBYOKConfigured } from "@/lib/byok";
 
 export type MigrationStep =
   | "idle"
@@ -210,6 +210,14 @@ export function useMigrationStream(
       const log = (level: "info" | "success" | "warn" | "error", msg: string) => {
         optionsRef.current.onLog?.(level, msg);
       };
+
+      if (!isBYOKConfigured(byokConfig)) {
+        log("error", "AI Provider setup is mandatory. Please configure your AI provider before running migration.");
+        setIsStreaming(false);
+        setError("AI Provider setup is mandatory. Please configure your AI provider.");
+        setStep("error");
+        return;
+      }
 
       try {
         const headers: Record<string, string> = {

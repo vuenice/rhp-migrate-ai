@@ -129,7 +129,7 @@ export function NewProjectModal({
       if (onProjectCreated) {
         onProjectCreated(workspaceId);
       }
-      router.push(`/workbench/${workspaceId}`);
+      router.push(`/workbench/${workspaceId}?setup=true`);
     } catch (err: any) {
       console.error("[Workspace] Failed to upload ZIP archive:", err);
       setUploadError(
@@ -197,7 +197,7 @@ export function NewProjectModal({
       if (onProjectCreated) {
         onProjectCreated(workspaceId);
       }
-      router.push(`/workbench/${workspaceId}`);
+      router.push(`/workbench/${workspaceId}?setup=true`);
     } catch (err: any) {
       console.error("[Workspace] Failed to clone GitHub repo:", err);
       setCloneError(
@@ -215,7 +215,7 @@ export function NewProjectModal({
     if (onProjectCreated) {
       onProjectCreated("demo");
     }
-    router.push("/workbench/demo");
+    router.push("/workbench/demo?setup=true");
   };
 
   const formatFileSize = (bytes: number) => {

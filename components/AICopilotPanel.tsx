@@ -36,8 +36,9 @@ import {
   ActiveRuleItem,
   ActiveRulesResponse,
   SaveLearningFixRequest,
+  BYOKConfig,
 } from "@/types/workbench";
-import { getStoredBYOKConfig } from "@/lib/byok";
+import { getStoredBYOKConfig, isBYOKConfigured } from "@/lib/byok";
 
 interface AICopilotPanelProps {
   scorecard: ASTScorecardData | null;
@@ -47,7 +48,11 @@ interface AICopilotPanelProps {
   activeCode?: string;
   workspaceId?: string;
   isStreaming: boolean;
+  byokConfig?: BYOKConfig;
+  onOpenSettings?: () => void;
   onSendMessage: (message: string) => void;
+  onStartMigration?: () => void;
+  hasMigrated?: boolean;
   onClearLogs?: () => void;
   onRunCompilerCheck?: () => void;
   onAcceptAndNext?: () => void;
@@ -149,12 +154,16 @@ export function AICopilotPanel({
   workspaceId,
   isStreaming,
   onSendMessage,
+  onStartMigration,
+  hasMigrated,
   onClearLogs,
   onRunCompilerCheck,
   onAcceptAndNext,
   onRepromptCritic,
   diagnosticsCount = 0,
   migrationStep = "idle",
+  byokConfig,
+  onOpenSettings,
 }: AICopilotPanelProps) {
   // Navigation tabs: Copilot & Loop vs Learned Rules
   const [activeTab, setActiveTab] = useState<"copilot" | "rules">("copilot");
@@ -183,7 +192,7 @@ export function AICopilotPanel({
   const chatEndRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
-  const byok = getStoredBYOKConfig();
+  const byok = byokConfig || getStoredBYOKConfig();
 
   // Scroll triggers
   useEffect(() => {
@@ -291,6 +300,10 @@ export function AICopilotPanel({
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!inputText.trim() || isStreaming) return;
+    if (!isBYOKConfigured(byok)) {
+      onOpenSettings?.();
+      return;
+    }
     onSendMessage(inputText.trim());
     setInputText("");
   };
@@ -332,10 +345,27 @@ export function AICopilotPanel({
             AI Copilot &amp; Rules
           </h2>
         </div>
-        <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-neutral-800 border border-neutral-700/60 text-[10px] text-neutral-300 font-mono">
-          <Cpu className="h-3 w-3 text-emerald-400" />
-          <span className="truncate max-w-[90px]">{byok.modelName}</span>
-        </div>
+        {isBYOKConfigured(byok) ? (
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            title={`AI Provider: ${byok.provider} (${byok.modelName}) — Click to configure`}
+            className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-neutral-800 border border-neutral-700/60 text-[10px] text-neutral-300 font-mono hover:border-neutral-500 transition-colors"
+          >
+            <Cpu className="h-3 w-3 text-emerald-400" />
+            <span className="truncate max-w-[100px]">{byok.modelName}</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            title="AI Provider setup is mandatory. Click to configure."
+            className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-500/50 text-[10px] text-amber-300 font-mono hover:bg-amber-900/60 transition-colors animate-pulse"
+          >
+            <AlertCircle className="h-3 w-3 text-amber-400" />
+            <span className="truncate max-w-[110px]">Setup AI Provider</span>
+          </button>
+        )}
       </div>
 
       {/* Navigation Tab Switcher: Copilot & Loop vs Learned Rules */}
@@ -622,8 +652,22 @@ export function AICopilotPanel({
             </div>
           </div>
 
-          {/* Action Buttons: Critic & Advance */}
-          {(onRepromptCritic || onAcceptAndNext) && (
+          {/* Action Buttons: Pre-Migration vs Post-Migration */}
+          {activeFile && !Boolean(hasMigrated || activeFile.status === "migrated" || activeFile.status === "warning" || migrationStep === "done") && !isStreaming ? (
+            <div className="px-3 pt-2 pb-1 border-t border-neutral-800 bg-neutral-950">
+              <button
+                type="button"
+                onClick={() =>
+                  onStartMigration ? onStartMigration() : onSendMessage("Migrate this file to strict RHP")
+                }
+                disabled={isStreaming}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium text-xs shadow-md shadow-emerald-950/40 transition-all disabled:opacity-50"
+              >
+                <Sparkles className="h-3.5 w-3.5 text-emerald-200" />
+                <span>Start Migration with AI</span>
+              </button>
+            </div>
+          ) : (Boolean(hasMigrated || activeFile?.status === "migrated" || activeFile?.status === "warning" || migrationStep === "done") && (onRepromptCritic || onAcceptAndNext)) ? (
             <div className="px-3 pt-2 pb-1 border-t border-neutral-800 bg-neutral-950 flex items-center gap-2">
               {onRepromptCritic && (
                 <button
@@ -634,7 +678,7 @@ export function AICopilotPanel({
                   className="flex-1 flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-amber-600/40 bg-amber-950/40 text-amber-300 hover:bg-amber-900/50 hover:text-amber-100 disabled:opacity-50 transition-colors font-medium text-[11px] shadow-sm"
                 >
                   <Sparkles className="h-3 w-3 text-amber-400" />
-                  <span>Re-prompt with Critic</span>
+                  <span>Re-prompt Critic</span>
                   {diagnosticsCount > 0 && (
                     <span className="px-1 py-0.2 rounded bg-amber-500/20 text-[10px] font-mono border border-amber-500/30">
                       {diagnosticsCount}
@@ -656,7 +700,7 @@ export function AICopilotPanel({
                 </button>
               )}
             </div>
-          )}
+          ) : null}
 
           {/* Quick Prompts Chips */}
           <div className="px-3 pt-2 pb-1 border-t border-neutral-800 bg-neutral-950/70">

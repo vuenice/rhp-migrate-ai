@@ -16,8 +16,8 @@ export const PROVIDERS: ProviderMeta[] = [
   {
     id: "gemini",
     name: "Google Gemini",
-    defaultModel: "gemini-2.5-pro",
-    models: ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-1.5-pro"],
+    defaultModel: "gemini-2.5-flash",
+    models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-pro", "gemini-2.0-flash"],
     requiresApiKey: true,
     description: "High context window & rapid code generation via Google AI Studio",
   },
@@ -68,10 +68,30 @@ export const PROVIDERS: ProviderMeta[] = [
 export const DEFAULT_BYOK_CONFIG: BYOKConfig = {
   provider: "gemini",
   apiKey: "",
-  modelName: "gemini-2.5-pro",
+  modelName: "gemini-2.5-flash",
   apiBase: "",
   temperature: 0.1,
+  isConfigured: false,
 };
+
+export function isBYOKConfigured(config?: BYOKConfig | null): boolean {
+  if (!config) return false;
+  if (!config.provider) return false;
+
+  const meta = PROVIDERS.find((p) => p.id === config.provider);
+  if (!meta) return false;
+
+  if (meta.requiresApiKey) {
+    return Boolean(config.apiKey && config.apiKey.trim().length > 0);
+  }
+  if (config.provider === "ollama") {
+    return Boolean(config.modelName && config.modelName.trim().length > 0);
+  }
+  if (config.provider === "mock") {
+    return Boolean(config.isConfigured);
+  }
+  return false;
+}
 
 export function getStoredBYOKConfig(): BYOKConfig {
   if (typeof window === "undefined") {
@@ -81,10 +101,12 @@ export function getStoredBYOKConfig(): BYOKConfig {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_BYOK_CONFIG;
     const parsed = JSON.parse(raw);
-    return {
+    const config: BYOKConfig = {
       ...DEFAULT_BYOK_CONFIG,
       ...parsed,
     };
+    config.isConfigured = isBYOKConfigured(config);
+    return config;
   } catch {
     return DEFAULT_BYOK_CONFIG;
   }
@@ -93,7 +115,11 @@ export function getStoredBYOKConfig(): BYOKConfig {
 export function saveBYOKConfig(config: BYOKConfig): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+    const toSave: BYOKConfig = {
+      ...config,
+      isConfigured: isBYOKConfigured(config),
+    };
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
   } catch (err) {
     console.error("Failed to save BYOK configuration to localStorage", err);
   }
@@ -101,6 +127,9 @@ export function saveBYOKConfig(config: BYOKConfig): void {
 
 export function buildBYOKHeaders(config?: BYOKConfig): Record<string, string> {
   const current = config || getStoredBYOKConfig();
+  if (!isBYOKConfigured(current)) {
+    return {};
+  }
   const headers: Record<string, string> = {
     "x-provider": current.provider,
   };

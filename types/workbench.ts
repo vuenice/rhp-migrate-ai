@@ -6,6 +6,7 @@ export interface BYOKConfig {
   modelName: string;
   apiBase?: string;
   temperature?: number;
+  isConfigured?: boolean;
 }
 
 export type FileStatus = "pending" | "analyzing" | "warning" | "migrated";
@@ -100,3 +101,11 @@ export interface SaveLearningFixRequest {
   content?: string;
 }
 
+export interface ManifestStatusResponse {
+  workspace_id: string;
+  has_manifest: boolean;
+  manifest_path?: string | null;
+  content?: string | null;
+  package_name?: string | null;
+  psr4?: Record<string, string>;
+}
