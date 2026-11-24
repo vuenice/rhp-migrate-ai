@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import {
   FileTree,
@@ -375,6 +375,8 @@ export default function WorkbenchPage() {
     total: 0,
     currentFile: "",
   });
+  const batchAbortControllerRef = useRef<AbortController | null>(null);
+  const isBatchCancelledRef = useRef<boolean>(false);
 
   // Compiler logs & AST scorecard
   const [scorecard, setScorecard] = useState<ASTScorecardData | null>(null);
@@ -789,6 +791,7 @@ export default function WorkbenchPage() {
     verified: isVerified,
     startMigration,
     rePromptWithCritic,
+    cancelMigration,
     setEditorInstance,
   } = useMigrationStream({
     filePath: activeFile?.path || "input.php",
@@ -953,6 +956,17 @@ export default function WorkbenchPage() {
     handleBatchMigrate();
   };
 
+  // Action: Stop automated batch migration
+  const handleStopBatchMigrate = useCallback(() => {
+    isBatchCancelledRef.current = true;
+    if (batchAbortControllerRef.current) {
+      batchAbortControllerRef.current.abort();
+      batchAbortControllerRef.current = null;
+    }
+    setIsBatchMigrating(false);
+    addCompilerLog("warn", "Batch migration stopped by user.");
+  }, [addCompilerLog]);
+
   // Action: Automated batch migration across all pending PHP files
   const handleBatchMigrate = async () => {
     if (isBatchMigrating) return;
@@ -973,12 +987,18 @@ export default function WorkbenchPage() {
       return;
     }
 
+    isBatchCancelledRef.current = false;
     setIsBatchMigrating(true);
     addCompilerLog("info", `Starting batch migration for ${pendingPhp.length} pending PHP files...`);
 
     const headers = buildBYOKHeaders(byokConfig);
 
     for (let i = 0; i < pendingPhp.length; i++) {
+      if (isBatchCancelledRef.current) {
+        addCompilerLog("warn", "Batch migration halted.");
+        break;
+      }
+
       const file = pendingPhp[i];
       let content = "";
       setBatchProgress({
@@ -989,9 +1009,13 @@ export default function WorkbenchPage() {
       updateFileStatus(file.path, "analyzing");
       addCompilerLog("info", `[${i + 1}/${pendingPhp.length}] Migrating ${file.path}...`);
 
+      const controller = new AbortController();
+      batchAbortControllerRef.current = controller;
+
       try {
         const fileRes = await fetch(
-          `/api/workspace/${workspaceId}/file?path=${encodeURIComponent(file.path)}`
+          `/api/workspace/${workspaceId}/file?path=${encodeURIComponent(file.path)}`,
+          { signal: controller.signal }
         );
         if (fileRes.ok) {
           const fileData = await fileRes.json();
@@ -1000,11 +1024,22 @@ export default function WorkbenchPage() {
           content = SAMPLE_PHP_CODE[file.path]?.php || `<?php\n// ${file.name}\n`;
         }
 
+        if (isBatchCancelledRef.current) {
+          updateFileStatus(file.path, "pending");
+          break;
+        }
+
         const migRes = await fetch("/api/migrate/file", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...headers },
           body: JSON.stringify({ file_path: file.path, code: content }),
+          signal: controller.signal,
         });
+
+        if (isBatchCancelledRef.current) {
+          updateFileStatus(file.path, "pending");
+          break;
+        }
 
         if (migRes.ok) {
           const migData = await migRes.json();
@@ -1023,7 +1058,12 @@ export default function WorkbenchPage() {
           await persistWorkspaceFile(file.path, content, "migrated");
           addCompilerLog("success", `[${i + 1}/${pendingPhp.length}] ${file.name}: Transpiled to strict RHP.`);
         }
-      } catch {
+      } catch (err: any) {
+        if (err.name === "AbortError" || isBatchCancelledRef.current) {
+          addCompilerLog("warn", `[${i + 1}/${pendingPhp.length}] ${file.name}: Migration stopped.`);
+          updateFileStatus(file.path, "pending");
+          break;
+        }
         addCompilerLog(
           "warn",
           `[${i + 1}/${pendingPhp.length}] ${file.name}: Migration completed with fallback rules.`
@@ -1032,12 +1072,15 @@ export default function WorkbenchPage() {
         if (content) {
           await persistWorkspaceFile(file.path, content, "migrated");
         }
+      } finally {
+        batchAbortControllerRef.current = null;
       }
     }
 
-
     setIsBatchMigrating(false);
-    addCompilerLog("success", "Batch migration completed! All workspace files processed.");
+    if (!isBatchCancelledRef.current) {
+      addCompilerLog("success", "Batch migration completed! All workspace files processed.");
+    }
   };
 
   // Action: Re-prompt with Critic
@@ -1206,6 +1249,7 @@ export default function WorkbenchPage() {
               onSelectFile={handleSelectFile}
               onStartMigration={handleStartMigration}
               onBatchMigrate={handleBatchMigrate}
+              onStopBatchMigrate={handleStopBatchMigrate}
               isBatchMigrating={isBatchMigrating}
               batchProgress={batchProgress}
               onRefreshTree={fetchWorkspaceTree}
@@ -1223,6 +1267,7 @@ export default function WorkbenchPage() {
               onChangeModified={setModifiedCode}
               isStreaming={isStreaming}
               onMigrateClick={() => handleMigrate()}
+              onStopStreaming={cancelMigration}
               onVerifyClick={handleRunCompilerCheck}
               onMount={setEditorInstance}
               onAcceptAndNext={handleAcceptAndNext}

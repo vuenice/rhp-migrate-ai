@@ -21,6 +21,7 @@ import {
   Boxes,
   FileSpreadsheet,
   HardDrive,
+  Square,
 } from "lucide-react";
 
 import { FileItem, FileStatus } from "@/types/workbench";
@@ -31,6 +32,7 @@ interface ProjectOverviewProps {
   onSelectFile: (file: FileItem) => void;
   onStartMigration: (preferredFile?: FileItem) => void;
   onBatchMigrate: () => void;
+  onStopBatchMigrate?: () => void;
   isBatchMigrating: boolean;
   batchProgress?: { current: number; total: number; currentFile: string };
   onRefreshTree: () => void;
@@ -46,6 +48,7 @@ export function ProjectOverview({
   onSelectFile,
   onStartMigration,
   onBatchMigrate,
+  onStopBatchMigrate,
   isBatchMigrating,
   batchProgress,
   onRefreshTree,
@@ -189,6 +192,19 @@ export function ProjectOverview({
                 </>
               )}
             </button>
+
+            {/* Stop Migration Button on Dashboard */}
+            {isBatchMigrating && onStopBatchMigrate && (
+              <button
+                type="button"
+                onClick={onStopBatchMigrate}
+                className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-300 hover:text-rose-100 font-medium text-xs shadow-sm transition-all transform hover:-translate-y-0.5 active:translate-y-0 cursor-pointer"
+                title="Stop the ongoing project migration"
+              >
+                <Square className="h-3.5 w-3.5 fill-rose-400 text-rose-400" />
+                <span>Stop Migration</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -227,15 +243,29 @@ export function ProjectOverview({
 
         {/* Batch Migration Progress Banner (if active) */}
         {isBatchMigrating && batchProgress && (
-          <div className="mt-4 p-3 rounded-lg border border-sky-500/30 bg-sky-950/20 space-y-2">
+          <div className="mt-4 p-3.5 rounded-xl border border-sky-500/30 bg-sky-950/20 space-y-2.5">
             <div className="flex items-center justify-between text-xs font-mono">
-              <span className="text-sky-300 flex items-center gap-1.5">
+              <span className="text-sky-300 flex items-center gap-2">
                 <RefreshCw className="h-3.5 w-3.5 animate-spin text-sky-400" />
-                Batch Migrating: <span className="text-white font-semibold truncate max-w-sm">{batchProgress.currentFile}</span>
+                <span>Migrating:</span>
+                <span className="text-white font-semibold truncate max-w-sm">{batchProgress.currentFile}</span>
               </span>
-              <span className="text-neutral-400">
-                File {batchProgress.current} of {batchProgress.total} ({Math.round((batchProgress.current / batchProgress.total) * 100)}%)
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="text-neutral-400">
+                  File {batchProgress.current} of {batchProgress.total} ({Math.round((batchProgress.current / batchProgress.total) * 100)}%)
+                </span>
+                {onStopBatchMigrate && (
+                  <button
+                    type="button"
+                    onClick={onStopBatchMigrate}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-300 hover:text-rose-100 font-sans text-xs font-medium transition-colors cursor-pointer"
+                    title="Stop migration"
+                  >
+                    <Square className="h-3 w-3 fill-rose-400 text-rose-400" />
+                    <span>Stop</span>
+                  </button>
+                )}
+              </div>
             </div>
             <div className="h-2 w-full bg-neutral-800 rounded-full overflow-hidden">
               <div

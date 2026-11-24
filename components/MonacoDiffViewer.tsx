@@ -20,6 +20,7 @@ import {
   RefreshCw,
   AlertCircle,
   Zap,
+  Square,
 } from "lucide-react";
 import { FileItem, FileStatus, ASTScorecardData } from "@/types/workbench";
 import { DiagnosticError, MigrationStep } from "@/hooks/useMigrationStream";
@@ -31,6 +32,7 @@ interface MonacoDiffViewerProps {
   onChangeModified?: (newCode: string) => void;
   isStreaming?: boolean;
   onMigrateClick?: () => void;
+  onStopStreaming?: () => void;
   onVerifyClick?: () => void;
   onMount?: (editor: any, monaco: any) => void;
   onAcceptAndNext?: () => void;
@@ -51,6 +53,7 @@ export function MonacoDiffViewer({
   onChangeModified,
   isStreaming = false,
   onMigrateClick,
+  onStopStreaming,
   onVerifyClick,
   onMount,
   onAcceptAndNext,
@@ -298,6 +301,19 @@ export function MonacoDiffViewer({
                 </button>
               )}
 
+              {/* Stop button while streaming in post-migration / critic state */}
+              {isStreaming && onStopStreaming && (
+                <button
+                  type="button"
+                  onClick={onStopStreaming}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-300 hover:text-rose-100 text-[11px] font-medium transition-colors cursor-pointer"
+                  title="Stop migration stream"
+                >
+                  <Square className="h-3 w-3 fill-rose-400 text-rose-400" />
+                  <span>Stop</span>
+                </button>
+              )}
+
               {/* Accept & Next File button (Primary CTA after migration) */}
               {onAcceptAndNext && (
                 <button
@@ -317,24 +333,39 @@ export function MonacoDiffViewer({
 
           {/* PRE-MIGRATION PRIMARY CTA */}
           {!isFileMigrated && onMigrateClick && (
-            <button
-              type="button"
-              onClick={onMigrateClick}
-              disabled={isStreaming}
-              className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium shadow-[0_0_16px_rgba(16,185,129,0.3)] hover:shadow-[0_0_24px_rgba(16,185,129,0.5)] disabled:opacity-50 transition-all text-xs"
-            >
-              {isStreaming ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  <span>Streaming RHP...</span>
-                </>
-              ) : (
-                <>
-                  <Zap className="h-3.5 w-3.5 text-emerald-200" />
-                  <span>Start Migration with AI</span>
-                </>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onMigrateClick}
+                disabled={isStreaming}
+                className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium shadow-[0_0_16px_rgba(16,185,129,0.3)] hover:shadow-[0_0_24px_rgba(16,185,129,0.5)] disabled:opacity-50 transition-all text-xs"
+              >
+                {isStreaming ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <span>Streaming RHP...</span>
+                  </>
+                ) : (
+                  <>
+                    <Zap className="h-3.5 w-3.5 text-emerald-200" />
+                    <span>Start Migration with AI</span>
+                  </>
+                )}
+              </button>
+
+              {/* Stop button while streaming in pre-migration state */}
+              {isStreaming && onStopStreaming && (
+                <button
+                  type="button"
+                  onClick={onStopStreaming}
+                  className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-300 hover:text-rose-100 font-medium text-xs transition-colors cursor-pointer"
+                  title="Stop streaming migration"
+                >
+                  <Square className="h-3 w-3 fill-rose-400 text-rose-400" />
+                  <span>Stop</span>
+                </button>
               )}
-            </button>
+            </div>
           )}
         </div>
       </div>
